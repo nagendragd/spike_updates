@@ -8,7 +8,7 @@
 //#include <context_sr_macros.h>
 //#include <setup.h>
 
-void loadAddrToReg(char * name, int * address, int reg, int*lower_12);
+void loadConstantToReg(char * name, int address, int reg, int*lower_12);
 
 unsigned long read_cycles(void)
 {
@@ -43,6 +43,10 @@ int v_upper_20;
 int t; // just for verification
 int t_lower_12;
 int t_upper_20;
+
+unsigned long HELPER_BASE = (1024*1024*16); // modify this base
+int helper_base_lower_12;
+int helper_base_upper_20;
 
 void initSparse()
 {
@@ -169,15 +173,15 @@ void genSparseVector(void)
     generateAsm("stw_r24_r18_imm_0_macro", STW(R24, R18, 0));
     generateAsm("stw_r24_r25_imm_0_macro", STW(R24, R25, 0));
 
-    loadAddrToReg("rows", rows, R24, &rows_lower_12);
+    loadConstantToReg("rows", (int)rows, R24, &rows_lower_12);
 
-    loadAddrToReg("vals", vals, R27, &vals_lower_12);
+    loadConstantToReg("vals", (int)vals, R27, &vals_lower_12);
 
-    loadAddrToReg("cols", cols, R28, &cols_lower_12);
+    loadConstantToReg("cols", (int)cols, R28, &cols_lower_12);
     printf("cols at 0x%x\n", &cols[0]);
 
-    loadAddrToReg("v", v, R29, &v_lower_12);
-    loadAddrToReg("y", y, R31, &y_lower_12);
+    loadConstantToReg("v", (int)v, R29, &v_lower_12);
+    loadConstantToReg("y", (int)y, R31, &y_lower_12);
 
     generateAsm("incr_r24_by_4_macro", INCR4(R24));
     generateAsm("ldw_r25_r24_imm_0_macro", LDW(R25, R24, 0));
@@ -213,10 +217,10 @@ void genSparseVector(void)
     generateAsm("reset_v30_r0_macro", VMV_VX(V30,R0));
 }
 
-void loadAddrToReg(char * name, int * address, int reg, int*var_lower_12)
+void loadConstantToReg(char * name, int address, int reg, int*var_lower_12)
 {
-    int upper_20 = (int)(address);
-    int lower_12 = (int)(address);
+    int upper_20 = address;
+    int lower_12 = address;
     upper_20 = upper_20 >> 12;
     lower_12 = lower_12 & 0xfff;
     *var_lower_12 = lower_12;
@@ -227,6 +231,40 @@ void loadAddrToReg(char * name, int * address, int reg, int*var_lower_12)
     generateAsm(str, ADD_IMM(reg, reg, lower_12));
     sprintf(&str[0], "sub_r%d_r%d_r12_macro", reg, reg);
     generateAsm(&str[0], SUB_R_R(reg, reg, R12));
+}
+
+void genHWHelper(void)
+{
+    // this is going to generate only the delta
+    // instructions needed over and above whatever
+    // genSparseVector(.) generates
+    loadConstantToReg("helper_base", HELPER_BASE, R30, &helper_base_lower_12);
+
+    // store n at *R30
+    // n is stored in R23
+    generateAsm("stw_r30_r23_imm_0_macro", STW(R30, R23, 0));
+
+    // store rows address at *(R30+4)
+    // rows is stored in R24
+    generateAsm("stw_r30_r24_imm_4_macro", STW(R30, R24, 4));
+
+    // store cols address at *(R30+8)
+    // cols is stored in R28
+    generateAsm("stw_r30_r28_imm_8_macro", STW(R30, R28, 8));
+
+    // store v address at *(R30+12)
+    // v is stored in R29
+    generateAsm("stw_r30_r29_imm_12_macro", STW(R30, R29, 12));
+
+    // store buffer id to *(R30+16)
+    // in our case, buffer id is 0
+    generateAsm("stw_r30_r0_imm_16_macro", STW(R30, R0, 16));
+
+    // store start bit to *(R30+24)
+    // start bit is simply a 1 written to LSB
+    // first we gen instruction to store 1 into R22
+    generateAsm("add_r22_r0_imm_1_macro", ADD_IMM(R22, R0, 1));
+    generateAsm("stw_r30_r22_imm_16_macro", STW(R30, R22, 24));
 }
 
 #ifndef GENERATE_ONLY
@@ -390,6 +428,207 @@ post_inner_loop:
     vswv_r24_v28_macro;
     //stw_r24_r25_imm_0_macro;
 }
+
+void execHWHelper(void)
+{
+    // initialize locals i, j, s, k, vm;
+    // i maps to R18
+    // j maps to R19
+    // s maps to R20
+    // k maps to R21
+    // vm maps to R22
+    // n maps to R23
+    // rows address maps to R24
+    // rows[i] maps to R25
+    // rows[i+1] maps to R26
+    // nnz maps to R25 - dont need old R25
+    // num_iters maps to R26
+    // address of vals maps to R27
+    
+    // i,j, s, k, vm to 0
+    set_r18_0_macro; 
+    set_r19_0_macro; 
+    set_r20_0_macro; 
+    set_r21_0_macro; 
+    set_r22_0_macro; 
+
+    // load address of n to R23
+    ld_r23_n_upper_20_macro;
+    add_r23_r23_imm_n_lower_12_macro;
+    ld_r12_imm_0xfffff_macro;
+    if (n_lower_12 & 0x800) sub_r23_r23_r12_macro;
+
+    // load value of n to R23 (do not need address of n anymore)
+    ldw_r23_r23_imm_0_macro;
+
+    // VL: 256 bits
+    add_r6_r0_imm_256_macro;
+
+    // SEW: 32 bits
+    vsetvli_r7_r6_e32_macro;
+
+    // outer loop on n.
+    // for (int i=0;i<n;i++)
+    // do the increment of i and then compare
+
+    // load R24 with address of rows
+    ld_r24_rows_upper_20_macro;
+    add_r24_r24_imm_rows_lower_12_macro;
+    if (rows_lower_12 & 0x800) sub_r24_r24_r12_macro;
+
+    // load R27 with address of vals
+    ld_r27_vals_upper_20_macro;
+    add_r27_r27_imm_vals_lower_12_macro;
+    if (vals_lower_12 & 0x800) sub_r27_r27_r12_macro;
+
+    // load R28 with address of cols
+    ld_r28_cols_upper_20_macro;
+    add_r28_r28_imm_cols_lower_12_macro;
+    if (cols_lower_12 & 0x800) sub_r28_r28_r12_macro;
+
+    // load R29 with address of v[.] vector
+    ld_r29_v_upper_20_macro;
+    add_r29_r29_imm_v_lower_12_macro;
+    if (v_lower_12 & 0x800) sub_r29_r29_r12_macro;
+
+    // load R31 with address of y[.] vector
+    ld_r31_y_upper_20_macro;
+    add_r31_r31_imm_y_lower_12_macro;
+    if (y_lower_12 & 0x800) sub_r31_r31_r12_macro;
+
+hw_helper_init:
+    // program the HW helper with the following:
+    // HW helper is memory mapped to locations [HELPER_BASE, HELPER_BASE+8KB]
+    // the base addresses of these writes are also specified below
+    // HELPER_BASE: n: number of rows
+    // HELPER_BASE+4: rows: address of rows[.] vector
+    // HELPER_BASE+8: cols: address of cols[.] vector
+    // HELPER_BASE+12: v: address of v[.] vector where v is 
+    // the vector corresponding to the operation M*v, M is the sparse
+    // matrix.
+    // HELPER_BASE+16: buffer id to be used to fill out values from v[.]
+    // HELPER_BASE+20: reserved
+    // HELPER_BASE+24: start bit. Writing a 1 to this location will
+    // prompt the buffer controller to start processing.
+    
+    // load the value of HELPER_BASE into R30
+    ld_r30_helper_base_upper_20_macro;
+    add_r30_r30_imm_helper_base_lower_12_macro;
+    if (helper_base_lower_12 & 0x800) sub_r30_r30_r12_macro;
+
+    // store n 
+    stw_r30_r23_imm_0_macro;
+
+    // store rows - address of rows[]
+    stw_r30_r24_imm_4_macro;
+
+    // store cols - address of cols[]
+    stw_r30_r28_imm_8_macro;
+
+    // store v  - address of v[]
+    stw_r30_r29_imm_12_macro;
+
+    // store 0  -- buffer id to use
+    stw_r30_r0_imm_16_macro;
+
+    // store 1 -- start bit 
+    add_r22_r0_imm_1_macro;
+    stw_r30_r22_imm_16_macro;
+
+outer_loop:
+    // load rows[i] - R25
+    ldw_r25_r24_imm_0_macro;
+    // increment R24 by 4
+    incr_r24_by_4_macro;
+    // load rows[i+1] - R26
+    ldw_r26_r24_imm_0_macro;
+
+    // compute nnz - R26 - R25 into R25
+    sub_r25_r26_r25_macro;
+
+    // compute num iterations
+    // divide nnz by vector width (8)
+    // this is just a shift right by 3
+    // followed by a check if nnz % 8 leaves a reminder
+    // for the last extra iteration
+    
+    srl_r26_r25_imm_3_macro;
+    //nop;
+    
+    // for the inner loop on number of iterations
+    // we need to set j to 0.
+    set_r19_0_macro; 
+    //nop;
+
+    // reset V30 that holds the sum to be output to Y[.]
+    reset_v30_r0_macro;
+
+    // check if j == number of iterations
+    // jump to 'post_inner_loop'
+    beq_r19_r26_imm_pos_48_macro;
+    //nop;
+
+    // set s to 0
+    set_r20_0_macro; 
+
+inner_loop:
+    // read vals[k] through vals[k+7] as a vector load
+    vlwv_v27_r27_macro;
+
+    // increment vals address by 32 bytes
+    incr32_r27_macro; 
+
+    // read cols[k] through cols[k+7] as a vector load
+    vlwv_v28_r28_macro;
+
+    // use indexed loads v[cols[k]] through v[cols[k+7]]
+    // as another vector indexed load
+    // note that the indexes must be address offsets.
+    // what we have here are indices of columns and not address offsets.
+    // as the offset is 4x column index (since data type is int),
+    // we just scale the cols by 4x.
+    vsll_vi_v28_v28_imm_4_macro;
+    vliwv_v29_r29_v28_macro; // v[.] loaded to V29
+    vmul_vv_v29_v27_v29_vm_macro; // pairwise multiply of vals[.] and v[.] into V29
+    vredsum_vs_v30_v30_v29_macro; // cumulate into v30
+
+    // increment cols address by 32 bytes
+    incr32_r28_macro; 
+
+    // increment j
+    incr_r19_macro; 
+    //nop;
+
+    // branch back to start of inner loop if j < number of iterations
+    blt_r19_r26_imm_neg_36_macro;
+    //nop;
+
+post_inner_loop:
+
+    // store Y[.] 
+    vswv_r31_v30_macro;
+
+    // move Y address forward by 4
+    incr4_r31_macro;
+
+    // reset V30 that holds the sum to be output to Y[.]
+    reset_v30_r0_macro;
+
+    incr_r18_macro; 
+
+    // branch back to start of outer loop if i < n
+    blt_r18_r23_imm_neg_92_macro;
+    //nop;
+
+    // for verification - store R18 to some unused variable t.
+    // use R24 to hold address of t.
+    ld_r24_t_upper_20_macro;
+    add_r24_r24_imm_t_lower_12_macro;
+    if (t_lower_12 & 0x800) sub_r24_r24_r12_macro;
+    vswv_r24_v28_macro;
+
+}
+
 #endif
 
 void execDenseScalar(void)
@@ -538,7 +777,7 @@ void usage(void)
     printf("Arg 1: 0 or 1 value -- 0 if only compile, 1 if compile+exec\n");
     printf("Arg 2: a dense matrix data file as input.\n");
     printf("Arg 3: 0 or 1 value -- 0 if doing dense, 1 if doing sparse\n");
-    printf("Arg 4: 0 or 1 value -- 0 if using scalar, 1 if using vectors\n");
+    printf("Arg 4: 0/1/2 value -- 0 if using scalar, 1 if using vectors, 2 if using hardware helper (2 is valid only with sparse)\n");
 }
 
 int main(int argc, char ** argv)
@@ -568,10 +807,18 @@ int main(int argc, char ** argv)
     if (strcmp(argv[3],"1") == 0) do_sparse = true;
 
     bool use_vectors = false;
+    bool use_hw_helper = false;
     if (strcmp(argv[4],"1") == 0) use_vectors = true;
+    if (strcmp(argv[4],"2") == 0) use_hw_helper = true;
+
+    if (!do_sparse && use_hw_helper) {
+        printf("Invalid options: HW Helper option is only valid with sparse computation.\n");
+        exit(0);
+    }
 
     genDenseVector();
     genSparseVector();
+    genHWHelper();
     execDenseScalar();
 
 #define COMPARE (121)
@@ -591,6 +838,10 @@ int main(int argc, char ** argv)
         {
             execSparseVector();
         }
+        else if (use_hw_helper)
+        {
+            execHWHelper();
+        }
         else
             execSparseScalar();
     }
@@ -600,7 +851,9 @@ int main(int argc, char ** argv)
             execDenseVector();
         }
         else
+        {
             execDenseScalar();
+        }
     }
     //restore_regs();
     e = read_cycles();
