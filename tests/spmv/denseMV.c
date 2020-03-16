@@ -44,7 +44,7 @@ int t; // just for verification
 int t_lower_12;
 int t_upper_20;
 
-unsigned long HELPER_BASE = (1024*1024*16); // modify this base
+unsigned long HELPER_BASE = (1024*1024*4); // modify this base
 int helper_base_lower_12;
 int helper_base_upper_20;
 
@@ -215,6 +215,7 @@ void genSparseVector(void)
     generateAsm("vmul_vv_v29_v27_v29_vm_macro", VMUL_VV(V29, V27, V29, VM));
     generateAsm("vredsum_vs_v30_v30_v29_macro", VREDSUM_VS(V30, V30, V29, VM));
     generateAsm("reset_v30_r0_macro", VMV_VX(V30,R0));
+    generateAsm("vlwv_v29_r30_macro", VLWV(V29,R30));
 }
 
 void loadConstantToReg(char * name, int address, int reg, int*var_lower_12)
@@ -264,7 +265,11 @@ void genHWHelper(void)
     // start bit is simply a 1 written to LSB
     // first we gen instruction to store 1 into R22
     generateAsm("add_r22_r0_imm_1_macro", ADD_IMM(R22, R0, 1));
-    generateAsm("stw_r30_r22_imm_16_macro", STW(R30, R22, 24));
+    generateAsm("stw_r30_r22_imm_24_macro", STW(R30, R22, 24));
+
+    // add 1KB to R30 - to move the HELPER to point to
+    // base address of buffer
+    generateAsm("add_r30_r30_imm_1024_macro", ADD_IMM(R30, R30, 1024));
 }
 
 #ifndef GENERATE_ONLY
@@ -533,7 +538,11 @@ hw_helper_init:
 
     // store 1 -- start bit 
     add_r22_r0_imm_1_macro;
-    stw_r30_r22_imm_16_macro;
+    stw_r30_r22_imm_24_macro;
+
+    // now move R30 by 1024 bytes to point to
+    // the buffer base
+    add_r30_r30_imm_1024_macro;
 
 outer_loop:
     // load rows[i] - R25
@@ -565,7 +574,7 @@ outer_loop:
 
     // check if j == number of iterations
     // jump to 'post_inner_loop'
-    beq_r19_r26_imm_pos_48_macro;
+    beq_r19_r26_imm_pos_36_macro;
     //nop;
 
     // set s to 0
@@ -578,29 +587,17 @@ inner_loop:
     // increment vals address by 32 bytes
     incr32_r27_macro; 
 
-    // read cols[k] through cols[k+7] as a vector load
-    vlwv_v28_r28_macro;
-
-    // use indexed loads v[cols[k]] through v[cols[k+7]]
-    // as another vector indexed load
-    // note that the indexes must be address offsets.
-    // what we have here are indices of columns and not address offsets.
-    // as the offset is 4x column index (since data type is int),
-    // we just scale the cols by 4x.
-    vsll_vi_v28_v28_imm_4_macro;
-    vliwv_v29_r29_v28_macro; // v[.] loaded to V29
+    // special buffered load
+    vlwv_v29_r30_macro; // v[.] loaded to V29 via buffer load
     vmul_vv_v29_v27_v29_vm_macro; // pairwise multiply of vals[.] and v[.] into V29
     vredsum_vs_v30_v30_v29_macro; // cumulate into v30
-
-    // increment cols address by 32 bytes
-    incr32_r28_macro; 
 
     // increment j
     incr_r19_macro; 
     //nop;
 
     // branch back to start of inner loop if j < number of iterations
-    blt_r19_r26_imm_neg_36_macro;
+    blt_r19_r26_imm_neg_24_macro;
     //nop;
 
 post_inner_loop:
@@ -617,7 +614,7 @@ post_inner_loop:
     incr_r18_macro; 
 
     // branch back to start of outer loop if i < n
-    blt_r18_r23_imm_neg_92_macro;
+    blt_r18_r23_imm_neg_80_macro;
     //nop;
 
     // for verification - store R18 to some unused variable t.
@@ -626,9 +623,7 @@ post_inner_loop:
     add_r24_r24_imm_t_lower_12_macro;
     if (t_lower_12 & 0x800) sub_r24_r24_r12_macro;
     vswv_r24_v28_macro;
-
 }
-
 #endif
 
 void execDenseScalar(void)
