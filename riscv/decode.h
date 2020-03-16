@@ -34,12 +34,6 @@ const int NCSR = 4096;
 #define X_RA 1
 #define X_SP 2
 
-#define FSR_VXRM_SHIFT 9
-#define FSR_VXRM  (0x3 << FSR_VXRM_SHIFT)
-
-#define FSR_VXSAT_SHIFT 8
-#define FSR_VXSAT  (0x1 << FSR_VXSAT_SHIFT)
-
 #define FP_RD_NE  0
 #define FP_RD_0   1
 #define FP_RD_DN  2
@@ -139,14 +133,6 @@ public:
   {
     return data[i];
   }
-  regfile_t()
-  {
-    reset();
-  }
-  void reset()
-  {
-    memset(data, 0, sizeof(data));
-  }
 private:
   T data[N];
 };
@@ -168,18 +154,14 @@ private:
 # define WRITE_REG(reg, value) STATE.XPR.write(reg, value)
 # define WRITE_FREG(reg, value) DO_WRITE_FREG(reg, freg(value))
 #else
-   /* 0 : int
-    * 1 : floating
-    * 2 : vector
-    */
 # define WRITE_REG(reg, value) ({ \
     reg_t wdata = (value); /* value may have side effects */ \
-    STATE.log_reg_write[(reg) << 2] = {wdata, 0}; \
+    STATE.log_reg_write = (commit_log_reg_t){(reg) << 1, {wdata, 0}}; \
     STATE.XPR.write(reg, wdata); \
   })
 # define WRITE_FREG(reg, value) ({ \
     freg_t wdata = freg(value); /* value may have side effects */ \
-    STATE.log_reg_write[((reg) << 2) | 1] = wdata; \
+    STATE.log_reg_write = (commit_log_reg_t){((reg) << 1) | 1, wdata}; \
     DO_WRITE_FREG(reg, wdata); \
   })
 #endif
@@ -202,7 +184,6 @@ private:
 #define FRS3 READ_FREG(insn.rs3())
 #define dirty_fp_state (STATE.mstatus |= MSTATUS_FS | (xlen == 64 ? MSTATUS64_SD : MSTATUS32_SD))
 #define dirty_ext_state (STATE.mstatus |= MSTATUS_XS | (xlen == 64 ? MSTATUS64_SD : MSTATUS32_SD))
-#define dirty_vs_state (STATE.mstatus |= MSTATUS_VS | (xlen == 64 ? MSTATUS64_SD : MSTATUS32_SD))
 #define DO_WRITE_FREG(reg, value) (STATE.FPR.write(reg, value), dirty_fp_state)
 #define WRITE_FRD(value) WRITE_FREG(insn.rd(), value)
  
@@ -225,20 +206,9 @@ private:
 #define require_fp require((STATE.mstatus & MSTATUS_FS) != 0)
 #define require_accelerator require((STATE.mstatus & MSTATUS_XS) != 0)
 
-#define require_vector_vs require((STATE.mstatus & MSTATUS_VS) != 0);
-#define require_vector \
-  do { \
-    require_vector_vs; \
-    require_extension('V'); \
-    require(!P.VU.vill); \
-    dirty_vs_state; \
-  } while (0);
-#define require_vector_for_vsetvl \
-  do {  \
-    require_vector_vs; \
-    require_extension('V'); \
-    dirty_vs_state; \
-  } while (0);
+#define require_vector_vs do { } while (0) // TODO MSTATUS_VS
+#define require_vector do { require_vector_vs; require_extension('V'); require(!P.VU.vill); } while (0)
+#define require_vector_for_vsetvl do { require_vector_vs; require_extension('V'); } while (0)
 
 #define set_fp_exceptions ({ if (softfloat_exceptionFlags) { \
                                dirty_fp_state; \
@@ -364,13 +334,10 @@ inline long double to_f(float128_t f){long double r; memcpy(&r, &f, sizeof(r)); 
 //
 // vector: masking skip helper
 //
-#define VI_MASK_VARS \
+#define VI_LOOP_ELEMENT_SKIP(BODY) \
   const int mlen = P.VU.vmlen; \
   const int midx = (mlen * i) / 64; \
   const int mpos = (mlen * i) % 64; \
-
-#define VI_LOOP_ELEMENT_SKIP(BODY) \
-  VI_MASK_VARS \
   if (insn.v_vm() == 0) { \
     BODY; \
     bool skip = ((P.VU.elt<uint64_t>(0, midx) >> mpos) & 0x1) == 0; \
@@ -415,18 +382,6 @@ static inline bool is_overlapped(const int astart, const int asize,
   if (insn.v_vm() == 0) \
     require(insn.rd() != 0);
 
-#define VI_CHECK_ST_INDEX \
-  require_vector; \
-  require((insn.rd() & (P.VU.vlmul - 1)) == 0); \
-  require((insn.rs2() & (P.VU.vlmul - 1)) == 0); \
-
-#define VI_CHECK_LD_INDEX \
-  VI_CHECK_ST_INDEX; \
-  if (insn.v_nf() > 0) \
-    require(!is_overlapped(insn.rd(), P.VU.vlmul, insn.rs2(), P.VU.vlmul)); \
-  if (insn.v_vm() == 0 && (insn.v_nf() > 0 || P.VU.vlmul > 1)) \
-    require(insn.rd() != 0); \
-
 #define VI_CHECK_MSS(is_vs1) \
   if (P.VU.vlmul > 1) { \
     require(!is_overlapped(insn.rd(), 1, insn.rs2(), P.VU.vlmul)); \
@@ -448,37 +403,23 @@ static inline bool is_overlapped(const int astart, const int asize,
       require(insn.rd() != 0); \
   }
 
-#define VI_CHECK_STORE_SXX \
-  require_vector; \
-  require((insn.rd() & (P.VU.vlmul - 1)) == 0);
-
 #define VI_CHECK_SXX \
-  VI_CHECK_STORE_SXX; \
-  if (P.VU.vlmul > 1 && insn.v_vm() == 0) { \
-    require(insn.rd() != 0); \
+  require_vector; \
+  if (P.VU.vlmul > 1) { \
+    require((insn.rd() & (P.VU.vlmul - 1)) == 0); \
+    if (insn.v_vm() == 0) \
+      require(insn.rd() != 0); \
   }
+
+#define VI_CHECK_SD \
+  require(!is_overlapped(insn.rd(), P.VU.vlmul, insn.rs2(), P.VU.vlmul * 2));
 
 #define VI_CHECK_DSS(is_vs1) \
   VI_WIDE_CHECK_COMMON; \
   require(!is_overlapped(insn.rd(), P.VU.vlmul * 2, insn.rs2(), P.VU.vlmul)); \
-  require((insn.rd() & (P.VU.vlmul * 2 - 1)) == 0); \
   require((insn.rs2() & (P.VU.vlmul - 1)) == 0); \
   if (is_vs1) {\
      require(!is_overlapped(insn.rd(), P.VU.vlmul * 2, insn.rs1(), P.VU.vlmul)); \
-     require((insn.rs1() & (P.VU.vlmul - 1)) == 0); \
-  }
-
-#define VI_CHECK_QSS(is_vs1) \
-  require_vector;\
-  require(P.VU.vlmul <= 2); \
-  require(P.VU.vsew * 4 <= P.VU.ELEN); \
-  require((insn.rd() & (P.VU.vlmul * 4 - 1)) == 0); \
-  if (insn.v_vm() == 0) \
-    require(insn.rd() != 0); \
-  require(!is_overlapped(insn.rd(), P.VU.vlmul * 4, insn.rs2(), P.VU.vlmul)); \
-  require((insn.rs2() & (P.VU.vlmul - 1)) == 0); \
-  if (is_vs1) {\
-     require(!is_overlapped(insn.rd(), P.VU.vlmul * 4, insn.rs1(), P.VU.vlmul)); \
      require((insn.rs1() & (P.VU.vlmul - 1)) == 0); \
   }
 
@@ -499,6 +440,7 @@ static inline bool is_overlapped(const int astart, const int asize,
 #define VI_CHECK_REDUCTION(is_wide) \
   require_vector;\
   if (is_wide) {\
+    require(P.VU.vlmul <= 4); \
     require(P.VU.vsew * 2 <= P.VU.ELEN); \
   } \
   require((insn.rs2() & (P.VU.vlmul - 1)) == 0); \
@@ -524,6 +466,10 @@ static inline bool is_overlapped(const int astart, const int asize,
   } \
   P.VU.vstart = 0;
 
+#define VI_LOOP_WIDEN_END \
+  } \
+  P.VU.vstart = 0;
+
 #define VI_LOOP_REDUCTION_END(x) \
   } \
   if (vl > 0) { \
@@ -542,7 +488,7 @@ static inline bool is_overlapped(const int astart, const int asize,
   for (reg_t i=P.VU.vstart; i<vl; ++i){ \
     VI_LOOP_ELEMENT_SKIP(); \
     uint64_t mmask = (UINT64_MAX << (64 - mlen)) >> (64 - mlen - mpos); \
-    uint64_t &vdi = P.VU.elt<uint64_t>(insn.rd(), midx, true); \
+    uint64_t &vdi = P.VU.elt<uint64_t>(insn.rd(), midx); \
     uint64_t res = 0;
 
 #define VI_LOOP_CMP_END \
@@ -599,68 +545,68 @@ static inline bool is_overlapped(const int astart, const int asize,
 // vector: integer and masking operand access helper
 //
 #define VXI_PARAMS(x) \
-  type_sew_t<x>::type &vd = P.VU.elt<type_sew_t<x>::type>(rd_num, i, true); \
+  type_sew_t<x>::type &vd = P.VU.elt<type_sew_t<x>::type>(rd_num, i); \
   type_sew_t<x>::type vs1 = P.VU.elt<type_sew_t<x>::type>(rs1_num, i); \
   type_sew_t<x>::type vs2 = P.VU.elt<type_sew_t<x>::type>(rs2_num, i); \
   type_sew_t<x>::type rs1 = (type_sew_t<x>::type)RS1; \
   type_sew_t<x>::type simm5 = (type_sew_t<x>::type)insn.v_simm5();
 
 #define VV_U_PARAMS(x) \
-  type_usew_t<x>::type &vd = P.VU.elt<type_usew_t<x>::type>(rd_num, i, true); \
+  type_usew_t<x>::type &vd = P.VU.elt<type_usew_t<x>::type>(rd_num, i); \
   type_usew_t<x>::type vs1 = P.VU.elt<type_usew_t<x>::type>(rs1_num, i); \
   type_usew_t<x>::type vs2 = P.VU.elt<type_usew_t<x>::type>(rs2_num, i);
 
 #define VX_U_PARAMS(x) \
-  type_usew_t<x>::type &vd = P.VU.elt<type_usew_t<x>::type>(rd_num, i, true); \
+  type_usew_t<x>::type &vd = P.VU.elt<type_usew_t<x>::type>(rd_num, i); \
   type_usew_t<x>::type rs1 = (type_usew_t<x>::type)RS1; \
   type_usew_t<x>::type vs2 = P.VU.elt<type_usew_t<x>::type>(rs2_num, i);
 
 #define VI_U_PARAMS(x) \
-  type_usew_t<x>::type &vd = P.VU.elt<type_usew_t<x>::type>(rd_num, i, true); \
-  type_usew_t<x>::type zimm5 = (type_usew_t<x>::type)insn.v_zimm5(); \
+  type_usew_t<x>::type &vd = P.VU.elt<type_usew_t<x>::type>(rd_num, i); \
+  type_usew_t<x>::type simm5 = (type_usew_t<x>::type)insn.v_zimm5(); \
   type_usew_t<x>::type vs2 = P.VU.elt<type_usew_t<x>::type>(rs2_num, i);
 
 #define VV_PARAMS(x) \
-  type_sew_t<x>::type &vd = P.VU.elt<type_sew_t<x>::type>(rd_num, i, true); \
+  type_sew_t<x>::type &vd = P.VU.elt<type_sew_t<x>::type>(rd_num, i); \
   type_sew_t<x>::type vs1 = P.VU.elt<type_sew_t<x>::type>(rs1_num, i); \
   type_sew_t<x>::type vs2 = P.VU.elt<type_sew_t<x>::type>(rs2_num, i);
 
 #define VX_PARAMS(x) \
-  type_sew_t<x>::type &vd = P.VU.elt<type_sew_t<x>::type>(rd_num, i, true); \
+  type_sew_t<x>::type &vd = P.VU.elt<type_sew_t<x>::type>(rd_num, i); \
   type_sew_t<x>::type rs1 = (type_sew_t<x>::type)RS1; \
   type_sew_t<x>::type vs2 = P.VU.elt<type_sew_t<x>::type>(rs2_num, i);
 
 #define VI_PARAMS(x) \
-  type_sew_t<x>::type &vd = P.VU.elt<type_sew_t<x>::type>(rd_num, i, true); \
+  type_sew_t<x>::type &vd = P.VU.elt<type_sew_t<x>::type>(rd_num, i); \
   type_sew_t<x>::type simm5 = (type_sew_t<x>::type)insn.v_simm5(); \
   type_sew_t<x>::type vs2 = P.VU.elt<type_sew_t<x>::type>(rs2_num, i);
 
 #define XV_PARAMS(x) \
-  type_sew_t<x>::type &vd = P.VU.elt<type_sew_t<x>::type>(rd_num, i, true); \
+  type_sew_t<x>::type &vd = P.VU.elt<type_sew_t<x>::type>(rd_num, i); \
   type_usew_t<x>::type vs2 = P.VU.elt<type_usew_t<x>::type>(rs2_num, RS1);
 
 #define VI_XI_SLIDEDOWN_PARAMS(x, off) \
-  auto &vd = P.VU.elt<type_sew_t<x>::type>(rd_num, i, true); \
+  auto &vd = P.VU.elt<type_sew_t<x>::type>(rd_num, i); \
   auto vs2 = P.VU.elt<type_sew_t<x>::type>(rs2_num, i + off);
 
 #define VI_XI_SLIDEUP_PARAMS(x, offset) \
-  auto &vd = P.VU.elt<type_sew_t<x>::type>(rd_num, i, true); \
+  auto &vd = P.VU.elt<type_sew_t<x>::type>(rd_num, i); \
   auto vs2 = P.VU.elt<type_sew_t<x>::type>(rs2_num, i - offset);
 
 #define VI_NSHIFT_PARAMS(sew1, sew2) \
-  auto &vd = P.VU.elt<type_usew_t<sew1>::type>(rd_num, i, true); \
+  auto &vd = P.VU.elt<type_usew_t<sew1>::type>(rd_num, i); \
   auto vs2_u = P.VU.elt<type_usew_t<sew2>::type>(rs2_num, i); \
   auto vs2 = P.VU.elt<type_sew_t<sew2>::type>(rs2_num, i); \
   auto zimm5 = (type_usew_t<sew1>::type)insn.v_zimm5();
 
 #define VX_NSHIFT_PARAMS(sew1, sew2) \
-  auto &vd = P.VU.elt<type_usew_t<sew1>::type>(rd_num, i, true); \
+  auto &vd = P.VU.elt<type_usew_t<sew1>::type>(rd_num, i); \
   auto vs2_u = P.VU.elt<type_usew_t<sew2>::type>(rs2_num, i); \
   auto vs2 = P.VU.elt<type_sew_t<sew2>::type>(rs2_num, i); \
   auto rs1 = (type_sew_t<sew1>::type)RS1;
 
 #define VV_NSHIFT_PARAMS(sew1, sew2) \
-  auto &vd = P.VU.elt<type_usew_t<sew1>::type>(rd_num, i, true); \
+  auto &vd = P.VU.elt<type_usew_t<sew1>::type>(rd_num, i); \
   auto vs2_u = P.VU.elt<type_usew_t<sew2>::type>(rs2_num, i); \
   auto vs2 = P.VU.elt<type_sew_t<sew2>::type>(rs2_num, i); \
   auto vs1 = P.VU.elt<type_sew_t<sew1>::type>(rs1_num, i);
@@ -669,23 +615,12 @@ static inline bool is_overlapped(const int astart, const int asize,
   auto vs2 = P.VU.elt<type_sew_t<x>::type>(rs2_num, i); \
   auto rs1 = (type_sew_t<x>::type)RS1; \
   auto simm5 = (type_sew_t<x>::type)insn.v_simm5(); \
-  auto &vd = P.VU.elt<uint64_t>(rd_num, midx, true);
+  auto &vd = P.VU.elt<uint64_t>(rd_num, midx);
 
 #define VV_CARRY_PARAMS(x) \
   auto vs2 = P.VU.elt<type_sew_t<x>::type>(rs2_num, i); \
   auto vs1 = P.VU.elt<type_sew_t<x>::type>(rs1_num, i); \
-  auto &vd = P.VU.elt<uint64_t>(rd_num, midx, true);
-
-#define XI_WITH_CARRY_PARAMS(x) \
-  auto vs2 = P.VU.elt<type_sew_t<x>::type>(rs2_num, i); \
-  auto rs1 = (type_sew_t<x>::type)RS1; \
-  auto simm5 = (type_sew_t<x>::type)insn.v_simm5(); \
-  auto &vd = P.VU.elt<type_sew_t<x>::type>(rd_num, i, true);
-
-#define VV_WITH_CARRY_PARAMS(x) \
-  auto vs2 = P.VU.elt<type_sew_t<x>::type>(rs2_num, i); \
-  auto vs1 = P.VU.elt<type_sew_t<x>::type>(rs1_num, i); \
-  auto &vd = P.VU.elt<type_sew_t<x>::type>(rd_num, i, true);
+  auto &vd = P.VU.elt<uint64_t>(rd_num, midx);
 
 //
 // vector: integer and masking operation loop
@@ -826,7 +761,7 @@ static inline bool is_overlapped(const int astart, const int asize,
   reg_t rd_num = insn.rd(); \
   reg_t rs1_num = insn.rs1(); \
   reg_t rs2_num = insn.rs2(); \
-  auto &vd_0_des = P.VU.elt<type_sew_t<x>::type>(rd_num, 0, true); \
+  auto &vd_0_des = P.VU.elt<type_sew_t<x>::type>(rd_num, 0); \
   auto vd_0_res = P.VU.elt<type_sew_t<x>::type>(rs1_num, 0); \
   for (reg_t i=P.VU.vstart; i<vl; ++i){ \
     VI_LOOP_ELEMENT_SKIP(); \
@@ -857,7 +792,7 @@ static inline bool is_overlapped(const int astart, const int asize,
   reg_t rd_num = insn.rd(); \
   reg_t rs1_num = insn.rs1(); \
   reg_t rs2_num = insn.rs2(); \
-  auto &vd_0_des = P.VU.elt<type_usew_t<x>::type>(rd_num, 0, true); \
+  auto &vd_0_des = P.VU.elt<type_usew_t<x>::type>(rd_num, 0); \
   auto vd_0_res = P.VU.elt<type_usew_t<x>::type>(rs1_num, 0); \
   for (reg_t i=P.VU.vstart; i<vl; ++i){ \
     VI_LOOP_ELEMENT_SKIP(); \
@@ -1007,7 +942,7 @@ if (sew == e8){ \
 VI_LOOP_END 
 
 #define VI_NARROW_SHIFT(sew1, sew2) \
-  type_usew_t<sew1>::type &vd = P.VU.elt<type_usew_t<sew1>::type>(rd_num, i, true); \
+  type_usew_t<sew1>::type &vd = P.VU.elt<type_usew_t<sew1>::type>(rd_num, i); \
   type_usew_t<sew2>::type vs2_u = P.VU.elt<type_usew_t<sew2>::type>(rs2_num, i); \
   type_usew_t<sew1>::type zimm5 = (type_usew_t<sew1>::type)insn.v_zimm5(); \
   type_sew_t<sew2>::type vs2 = P.VU.elt<type_sew_t<sew2>::type>(rs2_num, i); \
@@ -1086,8 +1021,11 @@ VI_LOOP_END
   }else if(sew == e32){ \
     VV_PARAMS(e32); \
     BODY; \
+  }else if(sew == e64){ \
+    VV_PARAMS(e64); \
+    BODY; \
   } \
-  VI_LOOP_END
+  VI_LOOP_WIDEN_END 
 
 #define VI_VX_LOOP_WIDEN(BODY) \
   VI_LOOP_BASE \
@@ -1100,26 +1038,29 @@ VI_LOOP_END
   }else if(sew == e32){ \
     VX_PARAMS(e32); \
     BODY; \
+  }else if(sew == e64){ \
+    VX_PARAMS(e64); \
+    BODY; \
   } \
-  VI_LOOP_END
+  VI_LOOP_WIDEN_END 
 
 #define VI_WIDE_OP_AND_ASSIGN(var0, var1, var2, op0, op1, sign) \
   switch(P.VU.vsew) { \
   case e8: { \
     sign##16_t vd_w = P.VU.elt<sign##16_t>(rd_num, i); \
-    P.VU.elt<uint16_t>(rd_num, i, true) = \
+    P.VU.elt<uint16_t>(rd_num, i) = \
       op1((sign##16_t)(sign##8_t)var0 op0 (sign##16_t)(sign##8_t)var1) + var2; \
     } \
     break; \
   case e16: { \
     sign##32_t vd_w = P.VU.elt<sign##32_t>(rd_num, i); \
-    P.VU.elt<uint32_t>(rd_num, i, true) = \
+    P.VU.elt<uint32_t>(rd_num, i) = \
       op1((sign##32_t)(sign##16_t)var0 op0 (sign##32_t)(sign##16_t)var1) + var2; \
     } \
     break; \
   default: { \
     sign##64_t vd_w = P.VU.elt<sign##64_t>(rd_num, i); \
-    P.VU.elt<uint64_t>(rd_num, i, true) = \
+    P.VU.elt<uint64_t>(rd_num, i) = \
       op1((sign##64_t)(sign##32_t)var0 op0 (sign##64_t)(sign##32_t)var1) + var2; \
     } \
     break; \
@@ -1150,81 +1091,135 @@ VI_LOOP_END
 #define VI_WIDE_WVX_OP(var0, op0, sign) \
   switch(P.VU.vsew) { \
   case e8: { \
-    sign##16_t &vd_w = P.VU.elt<sign##16_t>(rd_num, i, true); \
+    sign##16_t &vd_w = P.VU.elt<sign##16_t>(rd_num, i); \
     sign##16_t vs2_w = P.VU.elt<sign##16_t>(rs2_num, i); \
     vd_w = vs2_w op0 (sign##16_t)(sign##8_t)var0; \
     } \
     break; \
   case e16: { \
-    sign##32_t &vd_w = P.VU.elt<sign##32_t>(rd_num, i, true); \
+    sign##32_t &vd_w = P.VU.elt<sign##32_t>(rd_num, i); \
     sign##32_t vs2_w = P.VU.elt<sign##32_t>(rs2_num, i); \
     vd_w = vs2_w op0 (sign##32_t)(sign##16_t)var0; \
     } \
     break; \
   default: { \
-    sign##64_t &vd_w = P.VU.elt<sign##64_t>(rd_num, i, true); \
+    sign##64_t &vd_w = P.VU.elt<sign##64_t>(rd_num, i); \
     sign##64_t vs2_w = P.VU.elt<sign##64_t>(rs2_num, i); \
     vd_w = vs2_w op0 (sign##64_t)(sign##32_t)var0; \
     } \
     break; \
   }
 
-// quad operation loop
-#define VI_VV_LOOP_QUAD(BODY) \
-  VI_CHECK_QSS(true); \
+#define VI_WIDE_SSMA(sew1, sew2, opd) \
+  auto &vd = P.VU.elt<type_sew_t<sew2>::type>(rd_num, i); \
+  auto vs1 = P.VU.elt<type_sew_t<sew1>::type>(rs1_num, i); \
+  auto vs2 = P.VU.elt<type_sew_t<sew1>::type>(rs2_num, i); \
+  auto rs1 = (type_sew_t<sew1>::type)RS1; \
+  int##sew2##_t res; \
+  bool sat = false; \
+  const int gb = sew1 / 2; \
+  VRM vrm = P.VU.get_vround_mode(); \
+  res = (int##sew2##_t)vs2 * (int##sew2##_t)opd; \
+  INT_ROUNDING(res, vrm, gb); \
+  res = res >> gb; \
+  vd = sat_add<int##sew2##_t, uint##sew2##_t>(vd, res, sat); \
+  P.VU.vxsat |= sat;
+
+#define VI_VVX_LOOP_WIDE_SSMA(opd, is_vs1) \
+  VI_CHECK_DSS(is_vs1) \
   VI_LOOP_BASE \
   if (sew == e8){ \
-    VV_PARAMS(e8); \
-    BODY; \
-  }else if(sew == e16){ \
-    VV_PARAMS(e16); \
-    BODY; \
+    VI_WIDE_SSMA(8, 16, opd); \
+  } else if(sew == e16){ \
+    VI_WIDE_SSMA(16, 32, opd); \
+  } else if(sew == e32){ \
+    VI_WIDE_SSMA(32, 64, opd); \
   } \
-  VI_LOOP_END
+  VI_LOOP_WIDEN_END
 
-#define VI_VX_LOOP_QUAD(BODY) \
-  VI_CHECK_QSS(false); \
+#define VI_WIDE_USSMA(sew1, sew2, opd) \
+  auto &vd = P.VU.elt<type_usew_t<sew2>::type>(rd_num, i); \
+  auto vs1 = P.VU.elt<type_usew_t<sew1>::type>(rs1_num, i); \
+  auto vs2 = P.VU.elt<type_usew_t<sew1>::type>(rs2_num, i); \
+  auto rs1 = (type_usew_t<sew1>::type)RS1; \
+  uint##sew2##_t res; \
+  bool sat = false; \
+  const int gb = sew1 / 2; \
+  VRM vrm = P.VU.get_vround_mode(); \
+  res = (uint##sew2##_t)vs2 * (uint##sew2##_t)opd; \
+  INT_ROUNDING(res, vrm, gb); \
+  \
+  res = res >> gb; \
+  vd = sat_addu<uint##sew2##_t>(vd, res, sat); \
+  P.VU.vxsat |= sat;
+
+#define VI_VVX_LOOP_WIDE_USSMA(opd, is_vs1) \
+  VI_CHECK_DSS(is_vs1) \
   VI_LOOP_BASE \
   if (sew == e8){ \
-    VX_PARAMS(e8); \
-    BODY; \
-  }else if(sew == e16){ \
-    VX_PARAMS(e16); \
-    BODY; \
+    VI_WIDE_USSMA(8, 16, opd); \
+  } else if(sew == e16){ \
+    VI_WIDE_USSMA(16, 32, opd); \
+  } else if(sew == e32){ \
+    VI_WIDE_USSMA(32, 64, opd); \
   } \
-  VI_LOOP_END
+  VI_LOOP_WIDEN_END
 
-#define VI_QUAD_OP_AND_ASSIGN(var0, var1, var2, op0, op1, sign) \
-  switch(P.VU.vsew) { \
-  case e8: { \
-    sign##32_t vd_w = P.VU.elt<sign##32_t>(rd_num, i); \
-    P.VU.elt<uint32_t>(rd_num, i, true) = \
-      op1((sign##32_t)(sign##8_t)var0 op0 (sign##32_t)(sign##8_t)var1) + var2; \
-    } \
-    break; \
-  default: { \
-    sign##64_t vd_w = P.VU.elt<sign##64_t>(rd_num, i); \
-    P.VU.elt<uint64_t>(rd_num, i, true) = \
-      op1((sign##64_t)(sign##16_t)var0 op0 (sign##64_t)(sign##16_t)var1) + var2; \
-    } \
-    break; \
-  }
+#define VI_WIDE_SU_SSMA(sew1, sew2, opd) \
+  auto &vd = P.VU.elt<type_sew_t<sew2>::type>(rd_num, i); \
+  auto vs1 = P.VU.elt<type_sew_t<sew1>::type>(rs1_num, i); \
+  auto vs2 = P.VU.elt<type_usew_t<sew1>::type>(rs2_num, i); \
+  auto rs1 = (type_sew_t<sew1>::type)RS1; \
+  int##sew2##_t res; \
+  bool sat = false; \
+  const int gb = sew1 / 2; \
+  VRM vrm = P.VU.get_vround_mode(); \
+  res = (uint##sew2##_t)vs2 * (int##sew2##_t)opd; \
+  INT_ROUNDING(res, vrm, gb); \
+  \
+  res = res >> gb; \
+  vd = sat_sub<int##sew2##_t, uint##sew2##_t>(vd, res, sat); \
+  P.VU.vxsat |= sat;
 
-#define VI_QUAD_OP_AND_ASSIGN_MIX(var0, var1, var2, op0, op1, sign_d, sign_1, sign_2) \
-  switch(P.VU.vsew) { \
-  case e8: { \
-    sign_d##32_t vd_w = P.VU.elt<sign_d##32_t>(rd_num, i); \
-    P.VU.elt<uint32_t>(rd_num, i, true) = \
-      op1((sign_1##32_t)(sign_1##8_t)var0 op0 (sign_2##32_t)(sign_2##8_t)var1) + var2; \
-    } \
-    break; \
-  default: { \
-    sign_d##64_t vd_w = P.VU.elt<sign_d##64_t>(rd_num, i); \
-    P.VU.elt<uint64_t>(rd_num, i, true) = \
-      op1((sign_1##64_t)(sign_1##16_t)var0 op0 (sign_2##64_t)(sign_2##16_t)var1) + var2; \
-    } \
-    break; \
-  }
+#define VI_VVX_LOOP_WIDE_SU_SSMA(opd, is_vs1) \
+  VI_CHECK_DSS(is_vs1) \
+  VI_LOOP_BASE \
+  if (sew == e8){ \
+    VI_WIDE_SU_SSMA(8, 16, opd); \
+  } else if(sew == e16){ \
+    VI_WIDE_SU_SSMA(16, 32, opd); \
+  } else if(sew == e32){ \
+    VI_WIDE_SU_SSMA(32, 64, opd); \
+  } \
+  VI_LOOP_WIDEN_END
+
+#define VI_WIDE_US_SSMA(sew1, sew2, opd) \
+  auto &vd = P.VU.elt<type_sew_t<sew2>::type>(rd_num, i); \
+  auto vs1 = P.VU.elt<type_usew_t<sew1>::type>(rs1_num, i); \
+  auto vs2 = P.VU.elt<type_sew_t<sew1>::type>(rs2_num, i); \
+  auto rs1 = (type_usew_t<sew1>::type)RS1; \
+  int##sew2##_t res; \
+  bool sat = false; \
+  const int gb = sew1 / 2; \
+  VRM vrm = P.VU.get_vround_mode(); \
+  res = (int##sew2##_t)vs2 * (uint##sew2##_t)opd; \
+  INT_ROUNDING(res, vrm, gb); \
+  \
+  res = res >> gb; \
+  vd = sat_sub<int##sew2##_t, uint##sew2##_t>(vd, res, sat); \
+  P.VU.vxsat |= sat;
+
+#define VI_VVX_LOOP_WIDE_US_SSMA(opd) \
+  VI_CHECK_DSS(false) \
+  VI_LOOP_BASE \
+  if (sew == e8){ \
+    VI_WIDE_US_SSMA(8, 16, opd); \
+  } else if(sew == e16){ \
+    VI_WIDE_US_SSMA(16, 32, opd); \
+  } else if(sew == e32){ \
+    VI_WIDE_US_SSMA(32, 64, opd); \
+  } \
+  VI_LOOP_WIDEN_END
 
 // wide reduction loop - signed
 #define VI_LOOP_WIDE_REDUCTION_BASE(sew1, sew2) \
@@ -1232,7 +1227,7 @@ VI_LOOP_END
   reg_t rd_num = insn.rd(); \
   reg_t rs1_num = insn.rs1(); \
   reg_t rs2_num = insn.rs2(); \
-  auto &vd_0_des = P.VU.elt<type_sew_t<sew2>::type>(rd_num, 0, true); \
+  auto &vd_0_des = P.VU.elt<type_sew_t<sew2>::type>(rd_num, 0); \
   auto vd_0_res = P.VU.elt<type_sew_t<sew2>::type>(rs1_num, 0); \
   for (reg_t i=P.VU.vstart; i<vl; ++i){ \
     VI_LOOP_ELEMENT_SKIP(); \
@@ -1260,7 +1255,7 @@ VI_LOOP_END
   reg_t rd_num = insn.rd(); \
   reg_t rs1_num = insn.rs1(); \
   reg_t rs2_num = insn.rs2(); \
-  auto &vd_0_des = P.VU.elt<type_usew_t<sew2>::type>(rd_num, 0, true); \
+  auto &vd_0_des = P.VU.elt<type_usew_t<sew2>::type>(rd_num, 0); \
   auto vd_0_res = P.VU.elt<type_usew_t<sew2>::type>(rs1_num, 0); \
   for (reg_t i=P.VU.vstart; i<vl; ++i) { \
     VI_LOOP_ELEMENT_SKIP(); \
@@ -1285,8 +1280,7 @@ VI_LOOP_END
 // carry/borrow bit loop
 #define VI_VV_LOOP_CARRY(BODY) \
   VI_CHECK_MSS(true); \
-  VI_GENERAL_LOOP_BASE \
-  VI_MASK_VARS \
+  VI_LOOP_BASE \
     if (sew == e8){ \
       VV_CARRY_PARAMS(e8) \
       BODY; \
@@ -1300,12 +1294,11 @@ VI_LOOP_END
       VV_CARRY_PARAMS(e64) \
       BODY; \
     } \
-  VI_LOOP_END
+  } \
 
 #define VI_XI_LOOP_CARRY(BODY) \
   VI_CHECK_MSS(false); \
-  VI_GENERAL_LOOP_BASE \
-  VI_MASK_VARS \
+  VI_LOOP_BASE \
     if (sew == e8){ \
       XI_CARRY_PARAMS(e8) \
       BODY; \
@@ -1319,47 +1312,7 @@ VI_LOOP_END
       XI_CARRY_PARAMS(e64) \
       BODY; \
     } \
-  VI_LOOP_END
-
-#define VI_VV_LOOP_WITH_CARRY(BODY) \
-  require(P.VU.vlmul == 1 || insn.rd() != 0); \
-  VI_CHECK_SSS(true); \
-  VI_GENERAL_LOOP_BASE \
-  VI_MASK_VARS \
-    if (sew == e8){ \
-      VV_WITH_CARRY_PARAMS(e8) \
-      BODY; \
-    } else if (sew == e16) { \
-      VV_WITH_CARRY_PARAMS(e16) \
-      BODY; \
-    } else if (sew == e32) { \
-      VV_WITH_CARRY_PARAMS(e32) \
-      BODY; \
-    } else if (sew == e64) { \
-      VV_WITH_CARRY_PARAMS(e64) \
-      BODY; \
-    } \
-  VI_LOOP_END
-
-#define VI_XI_LOOP_WITH_CARRY(BODY) \
-  require(P.VU.vlmul == 1 || insn.rd() != 0); \
-  VI_CHECK_SSS(false); \
-  VI_GENERAL_LOOP_BASE \
-  VI_MASK_VARS \
-    if (sew == e8){ \
-      XI_WITH_CARRY_PARAMS(e8) \
-      BODY; \
-    } else if (sew == e16) { \
-      XI_WITH_CARRY_PARAMS(e16) \
-      BODY; \
-    } else if (sew == e32) { \
-      XI_WITH_CARRY_PARAMS(e32) \
-      BODY; \
-    } else if (sew == e64) { \
-      XI_WITH_CARRY_PARAMS(e64) \
-      BODY; \
-    } \
-  VI_LOOP_END
+  } \
 
 // average loop
 #define VI_VVX_LOOP_AVG(opd, op, is_vs1) \
@@ -1402,46 +1355,6 @@ VI_LOOP_BASE \
   } \
 VI_LOOP_END
 
-#define VI_VVX_ULOOP_AVG(opd, op, is_vs1) \
-VI_CHECK_SSS(is_vs1); \
-VRM xrm = p->VU.get_vround_mode(); \
-VI_LOOP_BASE \
-  switch(sew) { \
-    case e8: { \
-     VV_U_PARAMS(e8); \
-     type_usew_t<e8>::type rs1 = RS1; \
-     auto res = (uint16_t)vs2 op opd; \
-     INT_ROUNDING(res, xrm, 1); \
-     vd = res >> 1; \
-     break; \
-    } \
-    case e16: { \
-     VV_U_PARAMS(e16); \
-     type_usew_t<e16>::type rs1 = RS1; \
-     auto res = (uint32_t)vs2 op opd; \
-     INT_ROUNDING(res, xrm, 1); \
-     vd = res >> 1; \
-     break; \
-    } \
-    case e32: { \
-     VV_U_PARAMS(e32); \
-     type_usew_t<e32>::type rs1 = RS1; \
-     auto res = (uint64_t)vs2 op opd; \
-     INT_ROUNDING(res, xrm, 1); \
-     vd = res >> 1; \
-     break; \
-    } \
-    default: { \
-     VV_U_PARAMS(e64); \
-     type_usew_t<e64>::type rs1 = RS1; \
-     auto res = (uint128_t)vs2 op opd; \
-     INT_ROUNDING(res, xrm, 1); \
-     vd = res >> 1; \
-     break; \
-    } \
-  } \
-VI_LOOP_END
-
 //
 // vector: load/store helper 
 //
@@ -1460,32 +1373,32 @@ reg_t index[vlmax]; \
 for (reg_t i = 0; i < vlmax; ++i) { \
   switch(P.VU.vsew) { \
     case e8: \
-      index[i] = P.VU.elt<uint8_t>(v, i); \
+      index[i] = P.VU.elt<int8_t>(v, i); \
       break; \
     case e16: \
-      index[i] = P.VU.elt<uint16_t>(v, i); \
+      index[i] = P.VU.elt<int16_t>(v, i); \
       break; \
     case e32: \
-      index[i] = P.VU.elt<uint32_t>(v, i); \
+      index[i] = P.VU.elt<int32_t>(v, i); \
       break; \
     case e64: \
-      index[i] = P.VU.elt<uint64_t>(v, i); \
+      index[i] = P.VU.elt<int64_t>(v, i); \
       break; \
   } \
 }
 
-#define VI_ST_COMMON(stride, offset, st_width, elt_byte) \
+#define VI_ST(stride, offset, st_width, elt_byte) \
   const reg_t nf = insn.v_nf() + 1; \
   require((nf * P.VU.vlmul) <= (NVPR / 4)); \
+  VI_CHECK_SXX; \
   const reg_t vl = P.VU.vl; \
   const reg_t baseAddr = RS1; \
   const reg_t vs3 = insn.rd(); \
-  require(vs3 + nf * P.VU.vlmul <= NVPR); \
+  const reg_t vlmax = P.VU.vlmax; \
   const reg_t vlmul = P.VU.vlmul; \
-  for (reg_t i = 0; i < vl; ++i) { \
+  for (reg_t i = 0; i < vlmax && vl != 0; ++i) { \
     VI_STRIP(i) \
     VI_ELEMENT_SKIP(i); \
-    P.VU.vstart = i; \
     for (reg_t fn = 0; fn < nf; ++fn) { \
       st_width##_t val = 0; \
       switch (P.VU.vsew) { \
@@ -1507,53 +1420,41 @@ for (reg_t i = 0; i < vlmax; ++i) { \
   } \
   P.VU.vstart = 0; 
 
-#define VI_LD_COMMON(stride, offset, ld_width, elt_byte) \
+#define VI_LD(stride, offset, ld_width, elt_byte) \
   const reg_t nf = insn.v_nf() + 1; \
   require((nf * P.VU.vlmul) <= (NVPR / 4)); \
+  VI_CHECK_SXX; \
   const reg_t vl = P.VU.vl; \
   const reg_t baseAddr = RS1; \
   const reg_t vd = insn.rd(); \
-  require(vd + nf * P.VU.vlmul <= NVPR); \
+  const reg_t vlmax = P.VU.vlmax; \
   const reg_t vlmul = P.VU.vlmul; \
-  for (reg_t i = 0; i < vl; ++i) { \
+  for (reg_t i = 0; i < vlmax && vl != 0; ++i) { \
     VI_ELEMENT_SKIP(i); \
     VI_STRIP(i); \
-    P.VU.vstart = i; \
     for (reg_t fn = 0; fn < nf; ++fn) { \
       ld_width##_t val = MMU.load_##ld_width(baseAddr + (stride) + (offset) * elt_byte); \
+      if (vd + fn >= NVPR){ \
+         P.VU.vstart = vreg_inx;\
+         require(false); \
+      } \
       switch(P.VU.vsew){ \
         case e8: \
-          P.VU.elt<uint8_t>(vd + fn * vlmul, vreg_inx, true) = val; \
+          P.VU.elt<uint8_t>(vd + fn * vlmul, vreg_inx) = val; \
           break; \
         case e16: \
-          P.VU.elt<uint16_t>(vd + fn * vlmul, vreg_inx, true) = val; \
+          P.VU.elt<uint16_t>(vd + fn * vlmul, vreg_inx) = val; \
           break; \
         case e32: \
-          P.VU.elt<uint32_t>(vd + fn * vlmul, vreg_inx, true) = val; \
+          P.VU.elt<uint32_t>(vd + fn * vlmul, vreg_inx) = val; \
           break; \
         default: \
-          P.VU.elt<uint64_t>(vd + fn * vlmul, vreg_inx, true) = val; \
-          break; \
+          P.VU.elt<uint64_t>(vd + fn * vlmul, vreg_inx) = val; \
       } \
     } \
   } \
   P.VU.vstart = 0;
 
-#define VI_LD(stride, offset, ld_width, elt_byte) \
-  VI_CHECK_SXX; \
-  VI_LD_COMMON(stride, offset, ld_width, elt_byte)
-
-#define VI_LD_INDEX(stride, offset, ld_width, elt_byte) \
-  VI_CHECK_LD_INDEX; \
-  VI_LD_COMMON(stride, offset, ld_width, elt_byte)
-
-#define VI_ST(stride, offset, st_width, elt_byte) \
-  VI_CHECK_STORE_SXX; \
-  VI_ST_COMMON(stride, offset, st_width, elt_byte) \
-
-#define VI_ST_INDEX(stride, offset, st_width, elt_byte) \
-  VI_CHECK_ST_INDEX; \
-  VI_ST_COMMON(stride, offset, st_width, elt_byte) \
 
 #define VI_LDST_FF(itype, tsew) \
   require(p->VU.vsew >= e##tsew && p->VU.vsew <= e64); \
@@ -1565,37 +1466,33 @@ for (reg_t i = 0; i < vlmax; ++i) { \
   const reg_t baseAddr = RS1; \
   const reg_t rd_num = insn.rd(); \
   bool early_stop = false; \
+  const reg_t vlmax = P.VU.vlmax; \
   const reg_t vlmul = P.VU.vlmul; \
-  require(rd_num + nf * P.VU.vlmul <= NVPR); \
-  for (reg_t i = p->VU.vstart; i < vl; ++i) { \
+  for (reg_t i = 0; i < vlmax && vl != 0; ++i) { \
     VI_STRIP(i); \
     VI_ELEMENT_SKIP(i); \
     \
     for (reg_t fn = 0; fn < nf; ++fn) { \
-      itype##64_t val; \
-      try { \
-        val = MMU.load_##itype##tsew(baseAddr + (i * nf + fn) * (tsew / 8)); \
-      } catch (trap_t& t) { \
-        if (i == 0) \
-          throw; /* Only take exception on zeroth element */ \
-        /* Reduce VL if an exception occurs on a later element */ \
-        early_stop = true; \
-        P.VU.vl = i; \
-        break; \
-      } \
+      itype##64_t val = MMU.load_##itype##tsew(baseAddr + (i * nf + fn) * (tsew / 8)); \
       \
       switch (sew) { \
       case e8: \
-        p->VU.elt<uint8_t>(rd_num + fn * vlmul, vreg_inx, true) = val; \
+        p->VU.elt<uint8_t>(rd_num + fn * vlmul, vreg_inx) = val; \
         break; \
       case e16: \
-        p->VU.elt<uint16_t>(rd_num + fn * vlmul, vreg_inx, true) = val; \
+        p->VU.elt<uint16_t>(rd_num + fn * vlmul, vreg_inx) = val; \
         break; \
       case e32: \
-        p->VU.elt<uint32_t>(rd_num + fn * vlmul, vreg_inx, true) = val; \
+        p->VU.elt<uint32_t>(rd_num + fn * vlmul, vreg_inx) = val; \
         break; \
       case e64: \
-        p->VU.elt<uint64_t>(rd_num + fn * vlmul, vreg_inx, true) = val; \
+        p->VU.elt<uint64_t>(rd_num + fn * vlmul, vreg_inx) = val; \
+        break; \
+      } \
+       \
+      if (val == 0) { \
+        p->VU.vl = i; \
+        early_stop = true; \
         break; \
       } \
     } \
@@ -1606,13 +1503,14 @@ for (reg_t i = 0; i < vlmax; ++i) { \
   } \
   p->VU.vstart = 0;
 
+
 //
 // vector: vfp helper
 //
 #define VI_VFP_COMMON \
+  require_extension('F'); \
   require_fp; \
-  require((P.VU.vsew == e32 && p->supports_extension('F')) || \
-          (P.VU.vsew == e64 && p->supports_extension('D'))); \
+  require(P.VU.vsew == 32); \
   require_vector;\
   reg_t vl = P.VU.vl; \
   reg_t rd_num = insn.rd(); \
@@ -1633,17 +1531,17 @@ for (reg_t i = 0; i < vlmax; ++i) { \
     float32_t rs1 = f32(READ_FREG(rs1_num)); \
     VI_LOOP_ELEMENT_SKIP(); \
     uint64_t mmask = (UINT64_MAX << (64 - mlen)) >> (64 - mlen - mpos); \
-    uint64_t &vdi = P.VU.elt<uint64_t>(rd_num, midx, true); \
+    uint64_t &vdi = P.VU.elt<uint64_t>(rd_num, midx); \
     uint64_t res = 0;
 
-#define VI_VFP_LOOP_REDUCTION_BASE(width) \
-  float##width##_t vd_0 = P.VU.elt<float##width##_t>(rd_num, 0); \
-  float##width##_t vs1_0 = P.VU.elt<float##width##_t>(rs1_num, 0); \
+#define VI_VFP_LOOP_REDUCTION_BASE \
+  VI_VFP_COMMON \
+  float32_t vd_0 = P.VU.elt<float32_t>(rd_num, 0); \
+  float32_t vs1_0 = P.VU.elt<float32_t>(rs1_num, 0); \
   vd_0 = vs1_0;\
   for (reg_t i=P.VU.vstart; i<vl; ++i){ \
     VI_LOOP_ELEMENT_SKIP(); \
-    int##width##_t &vd = P.VU.elt<int##width##_t>(rd_num, i, true); \
-    float##width##_t vs2 = P.VU.elt<float##width##_t>(rs2_num, i); \
+    int32_t &vd = P.VU.elt<int32_t>(rd_num, i); \
 
 #define VI_VFP_LOOP_WIDE_REDUCTION_BASE \
   VI_VFP_COMMON \
@@ -1663,18 +1561,19 @@ for (reg_t i = 0; i < vlmax; ++i) { \
 #define VI_VFP_LOOP_REDUCTION_END(x) \
   } \
   P.VU.vstart = 0; \
+  set_fp_exceptions; \
   if (vl > 0) { \
-    P.VU.elt<type_sew_t<x>::type>(rd_num, 0, true) = vd_0.v; \
+    P.VU.elt<type_sew_t<x>::type>(rd_num, 0) = vd_0.v; \
   }
 
 #define VI_VFP_LOOP_CMP_END \
   switch(P.VU.vsew) { \
-    case e32: \
-    case e64: { \
+    case e32: { \
       vdi = (vdi & ~mmask) | (((res) << mpos) & mmask); \
       break; \
     } \
     case e16: \
+    case e8: \
     default: \
       require(0); \
       break; \
@@ -1683,27 +1582,20 @@ for (reg_t i = 0; i < vlmax; ++i) { \
   P.VU.vstart = 0; \
   set_fp_exceptions;
 
-#define VI_VFP_VV_LOOP(BODY32, BODY64) \
+#define VI_VFP_VV_LOOP(BODY) \
   VI_CHECK_SSS(true); \
   VI_VFP_LOOP_BASE \
   switch(P.VU.vsew) { \
     case e32: {\
-      float32_t &vd = P.VU.elt<float32_t>(rd_num, i, true); \
+      float32_t &vd = P.VU.elt<float32_t>(rd_num, i); \
       float32_t vs1 = P.VU.elt<float32_t>(rs1_num, i); \
       float32_t vs2 = P.VU.elt<float32_t>(rs2_num, i); \
-      BODY32; \
-      set_fp_exceptions; \
-      break; \
-    }\
-    case e64: {\
-      float64_t &vd = P.VU.elt<float64_t>(rd_num, i, true); \
-      float64_t vs1 = P.VU.elt<float64_t>(rs1_num, i); \
-      float64_t vs2 = P.VU.elt<float64_t>(rs2_num, i); \
-      BODY64; \
+      BODY; \
       set_fp_exceptions; \
       break; \
     }\
     case e16: \
+    case e8: \
     default: \
       require(0); \
       break; \
@@ -1711,55 +1603,30 @@ for (reg_t i = 0; i < vlmax; ++i) { \
   DEBUG_RVV_FP_VV; \
   VI_VFP_LOOP_END
 
-#define VI_VFP_VV_LOOP_REDUCTION(BODY32, BODY64) \
+#define VI_VFP_VV_LOOP_REDUCTION(BODY) \
   VI_CHECK_REDUCTION(false) \
-  VI_VFP_COMMON \
-  switch(P.VU.vsew) { \
-    case e32: {\
-      VI_VFP_LOOP_REDUCTION_BASE(32) \
-        BODY32; \
-        set_fp_exceptions; \
-      VI_VFP_LOOP_REDUCTION_END(e32) \
-      break; \
-    }\
-    case e64: {\
-      VI_VFP_LOOP_REDUCTION_BASE(64) \
-        BODY64; \
-        set_fp_exceptions; \
-      VI_VFP_LOOP_REDUCTION_END(e64) \
-      break; \
-    }\
-    case e16: \
-    default: \
-      require(0); \
-      break; \
-  }; \
+  VI_VFP_LOOP_REDUCTION_BASE \
+  float32_t vs2 = P.VU.elt<float32_t>(rs2_num, i); \
+  BODY; \
+  DEBUG_RVV_FP_VV; \
+  VI_VFP_LOOP_REDUCTION_END(e32)
 
 #define VI_VFP_VV_LOOP_WIDE_REDUCTION(BODY) \
   VI_VFP_LOOP_WIDE_REDUCTION_BASE \
   float64_t vs2 = f32_to_f64(P.VU.elt<float32_t>(rs2_num, i)); \
   BODY; \
-  set_fp_exceptions; \
   DEBUG_RVV_FP_VV; \
   VI_VFP_LOOP_REDUCTION_END(e64)
 
-#define VI_VFP_VF_LOOP(BODY32, BODY64) \
+#define VI_VFP_VF_LOOP(BODY) \
   VI_CHECK_SSS(false); \
   VI_VFP_LOOP_BASE \
   switch(P.VU.vsew) { \
     case e32: {\
-      float32_t &vd = P.VU.elt<float32_t>(rd_num, i, true); \
+      float32_t &vd = P.VU.elt<float32_t>(rd_num, i); \
       float32_t rs1 = f32(READ_FREG(rs1_num)); \
       float32_t vs2 = P.VU.elt<float32_t>(rs2_num, i); \
-      BODY32; \
-      set_fp_exceptions; \
-      break; \
-    }\
-    case e64: {\
-      float64_t &vd = P.VU.elt<float64_t>(rd_num, i, true); \
-      float64_t rs1 = f64(READ_FREG(rs1_num)); \
-      float64_t vs2 = P.VU.elt<float64_t>(rs2_num, i); \
-      BODY64; \
+      BODY; \
       set_fp_exceptions; \
       break; \
     }\
@@ -1772,31 +1639,12 @@ for (reg_t i = 0; i < vlmax; ++i) { \
   DEBUG_RVV_FP_VF; \
   VI_VFP_LOOP_END
 
-#define VI_VFP_LOOP_CMP(BODY32, BODY64, is_vs1) \
+#define VI_VFP_LOOP_CMP(BODY, is_vs1) \
   VI_CHECK_MSS(is_vs1); \
   VI_VFP_LOOP_CMP_BASE \
-  switch(P.VU.vsew) { \
-    case e32: {\
-      float32_t vs2 = P.VU.elt<float32_t>(rs2_num, i); \
-      float32_t vs1 = P.VU.elt<float32_t>(rs1_num, i); \
-      float32_t rs1 = f32(READ_FREG(rs1_num)); \
-      BODY32; \
-      set_fp_exceptions; \
-      break; \
-    }\
-    case e64: {\
-      float64_t vs2 = P.VU.elt<float64_t>(rs2_num, i); \
-      float64_t vs1 = P.VU.elt<float64_t>(rs1_num, i); \
-      float64_t rs1 = f64(READ_FREG(rs1_num)); \
-      BODY64; \
-      set_fp_exceptions; \
-      break; \
-    }\
-    case e16: \
-    default: \
-      require(0); \
-      break; \
-  }; \
+  BODY; \
+  set_fp_exceptions; \
+  DEBUG_RVV_FP_VV; \
   VI_VFP_LOOP_CMP_END \
 
 #define VI_VFP_VF_LOOP_WIDE(BODY) \
@@ -1804,7 +1652,7 @@ for (reg_t i = 0; i < vlmax; ++i) { \
   VI_VFP_LOOP_BASE \
   switch(P.VU.vsew) { \
     case e32: {\
-      float64_t &vd = P.VU.elt<float64_t>(rd_num, i, true); \
+      float64_t &vd = P.VU.elt<float64_t>(rd_num, i); \
       float64_t vs2 = f32_to_f64(P.VU.elt<float32_t>(rs2_num, i)); \
       float64_t rs1 = f32_to_f64(f32(READ_FREG(rs1_num))); \
       BODY; \
@@ -1826,7 +1674,7 @@ for (reg_t i = 0; i < vlmax; ++i) { \
   VI_VFP_LOOP_BASE \
   switch(P.VU.vsew) { \
     case e32: {\
-      float64_t &vd = P.VU.elt<float64_t>(rd_num, i, true); \
+      float64_t &vd = P.VU.elt<float64_t>(rd_num, i); \
       float64_t vs2 = f32_to_f64(P.VU.elt<float32_t>(rs2_num, i)); \
       float64_t vs1 = f32_to_f64(P.VU.elt<float32_t>(rs1_num, i)); \
       BODY; \
@@ -1847,7 +1695,7 @@ for (reg_t i = 0; i < vlmax; ++i) { \
   VI_VFP_LOOP_BASE \
   switch(P.VU.vsew) { \
     case e32: {\
-      float64_t &vd = P.VU.elt<float64_t>(rd_num, i, true); \
+      float64_t &vd = P.VU.elt<float64_t>(rd_num, i); \
       float64_t vs2 = P.VU.elt<float64_t>(rs2_num, i); \
       float64_t rs1 = f32_to_f64(f32(READ_FREG(rs1_num))); \
       BODY; \
@@ -1867,7 +1715,7 @@ for (reg_t i = 0; i < vlmax; ++i) { \
   VI_VFP_LOOP_BASE \
   switch(P.VU.vsew) { \
     case e32: {\
-      float64_t &vd = P.VU.elt<float64_t>(rd_num, i, true); \
+      float64_t &vd = P.VU.elt<float64_t>(rd_num, i); \
       float64_t vs2 = P.VU.elt<float64_t>(rs2_num, i); \
       float64_t vs1 = f32_to_f64(P.VU.elt<float32_t>(rs1_num, i)); \
       BODY; \
@@ -1883,7 +1731,8 @@ for (reg_t i = 0; i < vlmax; ++i) { \
   VI_VFP_LOOP_WIDE_END
 
 
-#define DEBUG_START             0x0
+// Seems that 0x0 doesn't work.
+#define DEBUG_START             0x100
 #define DEBUG_END               (0x1000 - 1)
 
 #endif

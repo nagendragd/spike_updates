@@ -13,6 +13,7 @@
 #include "byteorder.h"
 #include <stdlib.h>
 #include <vector>
+#include <iostream>
 
 // virtual memory configuration
 #define PGSHIFT 12
@@ -80,24 +81,18 @@ public:
 #endif
   }
 
-#ifndef RISCV_ENABLE_COMMITLOG
-# define READ_MEM(addr, size) ({})
-#else
-# define READ_MEM(addr, size) \
-  proc->state.log_mem_read.push_back(std::make_tuple(addr, 0, size));
-#endif
-
   // template for functions that load an aligned value from memory
   #define load_func(type) \
     inline type##_t load_##type(reg_t addr) { \
+      if (proc && proc->isBCRange(addr)) {\
+        type##_t data = *(type##_t *)proc->bc->read32(addr-proc->BUFFER_BASE);\
+        return from_le(data);\
+      }\
       if (unlikely(addr & (sizeof(type##_t)-1))) \
         return misaligned_load(addr, sizeof(type##_t)); \
       reg_t vpn = addr >> PGSHIFT; \
-      size_t size = sizeof(type##_t); \
-      if (likely(tlb_load_tag[vpn % TLB_ENTRIES] == vpn)) { \
-        if (proc) READ_MEM(addr, size); \
+      if (likely(tlb_load_tag[vpn % TLB_ENTRIES] == vpn)) \
         return from_le(*(type##_t*)(tlb_data[vpn % TLB_ENTRIES].host_offset + addr)); \
-      } \
       if (unlikely(tlb_load_tag[vpn % TLB_ENTRIES] == (vpn | TLB_CHECK_TRIGGERS))) { \
         type##_t data = from_le(*(type##_t*)(tlb_data[vpn % TLB_ENTRIES].host_offset + addr)); \
         if (!matched_trigger) { \
@@ -105,12 +100,10 @@ public:
           if (matched_trigger) \
             throw *matched_trigger; \
         } \
-        if (proc) READ_MEM(addr, size); \
         return data; \
       } \
       type##_t res; \
       load_slow_path(addr, sizeof(type##_t), (uint8_t*)&res); \
-      if (proc) READ_MEM(addr, size); \
       return from_le(res); \
     }
 
@@ -129,34 +122,40 @@ public:
 #ifndef RISCV_ENABLE_COMMITLOG
 # define WRITE_MEM(addr, value, size) ({})
 #else
-# define WRITE_MEM(addr, val, size) \
-  proc->state.log_mem_write.push_back(std::make_tuple(addr, val, size));
+# define WRITE_MEM(addr, val, size) ({ \
+    proc->state.log_mem_write.addr = addr; \
+    proc->state.log_mem_write.value = val; \
+    proc->state.log_mem_write.size = size; \
+  })
 #endif
 
   // template for functions that store an aligned value to memory
   #define store_func(type) \
     void store_##type(reg_t addr, type##_t val) { \
+      if (proc && proc->isBCRange(addr)) {\
+        proc->bc->write32(addr-proc->BUFFER_BASE, (uint8_t*)&val);\
+        return;\
+      }\
       if (unlikely(addr & (sizeof(type##_t)-1))) \
         return misaligned_store(addr, val, sizeof(type##_t)); \
       reg_t vpn = addr >> PGSHIFT; \
-      size_t size = sizeof(type##_t); \
-      if (likely(tlb_store_tag[vpn % TLB_ENTRIES] == vpn)) { \
-        if (proc) WRITE_MEM(addr, val, size); \
+      if (likely(tlb_store_tag[vpn % TLB_ENTRIES] == vpn)) \
         *(type##_t*)(tlb_data[vpn % TLB_ENTRIES].host_offset + addr) = to_le(val); \
-      } \
       else if (unlikely(tlb_store_tag[vpn % TLB_ENTRIES] == (vpn | TLB_CHECK_TRIGGERS))) { \
         if (!matched_trigger) { \
           matched_trigger = trigger_exception(OPERATION_STORE, addr, val); \
           if (matched_trigger) \
             throw *matched_trigger; \
         } \
-        if (proc) WRITE_MEM(addr, val, size); \
         *(type##_t*)(tlb_data[vpn % TLB_ENTRIES].host_offset + addr) = to_le(val); \
       } \
       else { \
 	type##_t le_val = to_le(val); \
-        if (proc) WRITE_MEM(addr, val, size); \
         store_slow_path(addr, sizeof(type##_t), (const uint8_t*)&le_val); \
+      } \
+      if (proc) { \
+        size_t size = sizeof(type##_t); \
+        WRITE_MEM(addr, val, size); \
       } \
   }
 
@@ -307,6 +306,8 @@ public:
     return 0;
 #endif
   }
+  void load_slow_path(reg_t addr, reg_t len, uint8_t* bytes);
+  void store_slow_path(reg_t addr, reg_t len, const uint8_t* bytes);
 
 private:
   simif_t* sim;
@@ -337,11 +338,6 @@ private:
 
   // handle uncommon cases: TLB misses, page faults, MMIO
   tlb_entry_t fetch_slow_path(reg_t addr);
-  void load_slow_path(reg_t addr, reg_t len, uint8_t* bytes);
-  void store_slow_path(reg_t addr, reg_t len, const uint8_t* bytes);
-  bool mmio_load(reg_t addr, size_t len, uint8_t* bytes);
-  bool mmio_store(reg_t addr, size_t len, const uint8_t* bytes);
-  bool mmio_ok(reg_t addr, access_type type);
   reg_t translate(reg_t addr, reg_t len, access_type type);
 
   // ITLB lookup

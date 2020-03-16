@@ -29,6 +29,7 @@ riscv_hdrs = \
 	debug_rom_defines.h \
 	remote_bitbang.h \
 	jtag_dtm.h \
+	buffer_controller.h \
 
 riscv_install_hdrs = mmio_plugin.h
 
@@ -55,6 +56,7 @@ riscv_srcs = \
 	debug_module.cc \
 	remote_bitbang.cc \
 	jtag_dtm.cc \
+	buffer_controller.cc \
 	$(riscv_gen_srcs) \
 
 riscv_test_srcs =
@@ -295,9 +297,7 @@ riscv_insn_ext_q = \
 
 riscv_insn_ext_v_alu_int = \
 	vaadd_vv \
-	vaaddu_vv \
 	vaadd_vx \
-	vaaddu_vx \
 	vadc_vim \
 	vadc_vvm \
 	vadc_vxm \
@@ -308,9 +308,7 @@ riscv_insn_ext_v_alu_int = \
 	vand_vv \
 	vand_vx \
 	vasub_vv \
-	vasubu_vv \
 	vasub_vx \
-	vasubu_vx \
 	vcompress_vm \
 	vdiv_vv \
 	vdiv_vx \
@@ -384,38 +382,27 @@ riscv_insn_ext_v_alu_int = \
 	vmv_v_v \
 	vmv_v_x \
 	vmv_x_s \
-	vmv1r_v \
-	vmv2r_v \
-	vmv4r_v \
-	vmv8r_v \
 	vmxnor_mm \
 	vmxor_mm \
-	vnclip_wi \
-	vnclip_wv \
-	vnclip_wx \
-	vnclipu_wi \
-	vnclipu_wv \
-	vnclipu_wx \
+	vnclip_vi \
+	vnclip_vv \
+	vnclip_vx \
+	vnclipu_vi \
+	vnclipu_vv \
+	vnclipu_vx \
 	vnmsac_vv \
 	vnmsac_vx \
 	vnmsub_vv \
 	vnmsub_vx \
-	vnsra_wi \
-	vnsra_wv \
-	vnsra_wx \
-	vnsrl_wi \
-	vnsrl_wv \
-	vnsrl_wx \
+	vnsra_vi \
+	vnsra_vv \
+	vnsra_vx \
+	vnsrl_vi \
+	vnsrl_vv \
+	vnsrl_vx \
 	vor_vi \
 	vor_vv \
 	vor_vx \
-	vqmacc_vv \
-	vqmacc_vx \
-	vqmaccsu_vv \
-	vqmaccsu_vx \
-	vqmaccu_vv \
-	vqmaccu_vx \
-	vqmaccus_vx \
 	vredand_vs \
 	vredmax_vs \
 	vredmaxu_vs \
@@ -493,6 +480,13 @@ riscv_insn_ext_v_alu_int = \
 	vwmulu_vx \
 	vwredsum_vs \
 	vwredsumu_vs \
+	vwsmacc_vv \
+	vwsmacc_vx \
+	vwsmaccsu_vv \
+	vwsmaccsu_vx \
+	vwsmaccu_vv \
+	vwsmaccu_vx \
+	vwsmaccus_vx \
 	vwsub_vv \
 	vwsub_vx \
 	vwsub_wv \
@@ -534,12 +528,11 @@ riscv_insn_ext_v_alu_fp = \
 	vfmv_f_s \
 	vfmv_s_f \
 	vfmv_v_f \
-	vfncvt_f_f_w \
-	vfncvt_f_x_w \
-	vfncvt_f_xu_w \
-	vfncvt_rod_f_f_w \
-	vfncvt_x_f_w \
-	vfncvt_xu_f_w \
+	vfncvt_f_f_v \
+	vfncvt_f_x_v \
+	vfncvt_f_xu_v \
+	vfncvt_x_f_v \
+	vfncvt_xu_f_v \
 	vfnmacc_vf \
 	vfnmacc_vv \
 	vfnmadd_vf \
@@ -600,7 +593,6 @@ riscv_insn_ext_v_alu_fp = \
 	vmfne_vv \
 
 riscv_insn_ext_v_ldst = \
-	vl1r_v \
 	vlb_v \
 	vlh_v \
 	vlw_v \
@@ -629,7 +621,6 @@ riscv_insn_ext_v_ldst = \
 	vlbuff_v \
 	vlhuff_v \
 	vlwuff_v \
-	vs1r_v \
 	vsb_v \
 	vsh_v \
 	vsw_v \
