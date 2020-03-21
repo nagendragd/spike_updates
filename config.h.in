@@ -12,6 +12,10 @@
 /* Default value for --vector switch */
 #undef DEFAULT_VARCH
 
+/* File path to an instruction timing file. */
+/* Default value for --timing switch */
+#undef DEFAULT_TIMING
+
 /* Path to the device-tree-compiler */
 #undef DTC
 
