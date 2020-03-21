@@ -24,6 +24,8 @@ volatile int last_op;
 int n;
 int n_lower_12;
 
+int num_r, num_c, num_nz;
+
 int m_lower_12;
 int v_lower_12;
 int y_lower_12;
@@ -44,7 +46,7 @@ int t; // just for verification
 int t_lower_12;
 int t_upper_20;
 
-unsigned long HELPER_BASE = (1024*1024*4); // modify this base
+unsigned long HELPER_BASE = (1024*1024*1024); // modify this base
 int helper_base_lower_12;
 int helper_base_upper_20;
 
@@ -768,43 +770,91 @@ void execDenseVector(void)
 
 void usage(void)
 {
-    printf("Program requires four args:\n");
+    printf("Program requires five args:\n");
     printf("Arg 1: 0 or 1 value -- 0 if only compile, 1 if compile+exec\n");
-    printf("Arg 2: a dense matrix data file as input.\n");
-    printf("Arg 3: 0 or 1 value -- 0 if doing dense, 1 if doing sparse\n");
-    printf("Arg 4: 0/1/2 value -- 0 if using scalar, 1 if using vectors, 2 if using hardware helper (2 is valid only with sparse)\n");
+    printf("Arg 2: 0 - dense matrix, 1 - CSR sparse matrix, 2 - TAMU COO sparse matrix\n");
+    printf("Arg 3: matrix data file as input.\n");
+    printf("Arg 4: 0 or 1 value -- 0 if doing dense, 1 if doing sparse\n");
+    printf("Arg 5: 0/1/2 value -- 0 if using scalar, 1 if using vectors, 2 if using hardware helper (2 is valid only with sparse)\n");
 }
+
+typedef enum {DENSE=0, CSR=1, COO=2} matrix_type_t;
 
 int main(int argc, char ** argv)
 {
-    // we want to define a vector of size 256 bits
-    // and element size of 32 bits. 
-    // which means each vector register can store 8 elements
-    // we are passing the VLEN value through scalar register 2.
-
-    if (argc <= 4) { usage(); return 0; }
+    if (argc <= 5) { usage(); return 0; }
     bool do_compile_exec = false;
     if (strcmp(argv[1],"1") == 0) do_compile_exec = true;
 
-    FILE*fp = fopen(argv[2],"r");
-    if (!fp) { printf("Could not open %s for reading.\n", argv[1]); return 0;}
-    fscanf(fp, "%d\n", &n);
-    m = (int*)malloc(n*n*sizeof(int));
-    v = (int*)malloc((n+8)*sizeof(int));
-    y = (int*)malloc((n+8)*sizeof(int));
-    for (int i=0;i<n*n;i++) fscanf(fp,"%d\n", &m[i]);
-    for (int i=0;i<n+8;i++) v[i] = 0;
-    for (int i=0;i<n;i++) fscanf(fp,"%d\n", &v[i]);
-    for (int i=0;i<n+8;i++) y[i] = 0;
+    FILE*fp = fopen(argv[3],"r");
+    if (!fp) { printf("Could not open %s for reading.\n", argv[3]); return 0;}
+    matrix_type_t matrix_type;
+    if (strcmp(argv[2], "0")==0) matrix_type=DENSE;
+    else if (strcmp(argv[2], "1")==0) matrix_type=CSR;
+    else if (strcmp(argv[2], "2")==0) matrix_type=COO;
+    else { printf("Unknown matrix type.\n"); usage(); return 0;}
+
+    if (matrix_type == DENSE) {
+        fscanf(fp, "%d\n", &n);
+        m = (int*)malloc(n*n*sizeof(int));
+        v = (int*)malloc((n+8)*sizeof(int));
+        y = (int*)malloc((n+8)*sizeof(int));
+        for (int i=0;i<n+8;i++) v[i] = 0;
+        for (int i=0;i<n+8;i++) y[i] = 0;
+        for (int i=0;i<n*n;i++) fscanf(fp,"%d\n", &m[i]);
+        for (int i=0;i<n;i++) fscanf(fp,"%d\n", &v[i]);
+    }
+    else if (matrix_type == CSR) {
+        printf("Format as yet unsupported\n");
+        return 0;
+    } else if (matrix_type == COO) {
+        // Read TAMU Matrix Market formatted input
+        // Assumptions: commented lines start with %
+        // Matrix COO indices are index-1 based and not index-0 based
+        char line[1024];
+        int matrix_sz_found=0;
+        while (fgets(&line[0], 1024, fp))
+        {
+            if (line[0] == '%') continue;
+            if (matrix_sz_found) {
+                int r, c, v_i;
+                float v_f;
+                sscanf(line, "%d %d %f\n", &r, &c, &v_f);
+                v_i = (int) v_f;
+                m[(r-1)*num_c+(c-1)]=v_i;
+            } else {
+                sscanf(line, "%d %d %d\n", &num_r, &num_c, &num_nz);
+                if (num_r != num_c) {
+                    printf("Non-square matrices are not yet supported\n");
+                    return 0;
+                }
+                matrix_sz_found = 1;
+                m = (int*)malloc(num_r*num_c*sizeof(int));
+                v = (int*)malloc((num_c+8)*sizeof(int));
+                y = (int*)malloc((num_c+8)*sizeof(int));
+                for (int i=0;i<num_r;i++) 
+                for (int j=0;j<num_c;j++)
+                    m[i*num_c + j]=0;
+                for (int i=0;i<num_c+8;i++) v[i] = 0;
+                for (int i=0;i<num_c+8;i++) y[i] = 0;
+                n=num_r;
+                printf("Matrix dimensions %d by %d\n", num_r, num_c);
+            }
+        } 
+
+        // TAMU format does not specify the vector v.
+        // so we generate a vector in our code.
+        for (int i=0;i<num_c;i++) v[i]=i+1;
+    }
     initSparse();
 
     bool do_sparse = false;
-    if (strcmp(argv[3],"1") == 0) do_sparse = true;
+    if (strcmp(argv[4],"1") == 0) do_sparse = true;
 
     bool use_vectors = false;
     bool use_hw_helper = false;
-    if (strcmp(argv[4],"1") == 0) use_vectors = true;
-    if (strcmp(argv[4],"2") == 0) use_hw_helper = true;
+    if (strcmp(argv[5],"1") == 0) use_vectors = true;
+    if (strcmp(argv[5],"2") == 0) use_hw_helper = true;
 
     if (!do_sparse && use_hw_helper) {
         printf("Invalid options: HW Helper option is only valid with sparse computation.\n");
