@@ -21,9 +21,8 @@ class remote_bitbang_t;
 class sim_t : public htif_t, public simif_t
 {
 public:
-  sim_t(const char* isa, const char* priv, const char* varch, size_t _nprocs,
-        bool halted, bool real_time_clint,
-        reg_t initrd_start, reg_t initrd_end,
+  sim_t(const char* isa, const char* priv, const char* varch, const char* timing, 
+        size_t _nprocs, bool halted,
         reg_t start_pc, std::vector<std::pair<reg_t, mem_t*>> mems,
         std::vector<std::pair<reg_t, abstract_device_t*>> plugin_devices,
         const std::vector<std::string>& args, const std::vector<int> hartids,
@@ -55,8 +54,6 @@ private:
   std::vector<std::pair<reg_t, abstract_device_t*>> plugin_devices;
   mmu_t* debug_mmu;  // debug port into main memory
   std::vector<processor_t*> procs;
-  reg_t initrd_start;
-  reg_t initrd_end;
   reg_t start_pc;
   std::string dts;
   std::unique_ptr<rom_device_t> boot_rom;
