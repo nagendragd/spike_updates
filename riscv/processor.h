@@ -301,7 +301,8 @@ class processor_t : public abstract_device_t
 {
 public:
   processor_t(const char* isa, const char* priv, const char* varch,
-              simif_t* sim, uint32_t id, bool halt_on_reset=false);
+              const char* timing, simif_t* sim, uint32_t id, 
+              bool halt_on_reset=false);
   ~processor_t();
 
   void set_debug(bool value);
@@ -437,6 +438,18 @@ public:
   void trigger_updated();
 
   int isBCRange(reg_t addr);
+
+  //lookup table for delays
+  struct table_entry
+  {
+    //insn_desc_t insn;
+    std::string mnemonic;
+    insn_bits_t match_opcode;
+    uint32_t delay;
+  };
+  std::vector<table_entry> lookup_table;
+  void initialize_delays(const char* timing);
+  uint64_t cycles;
 
 private:
   simif_t* sim;
