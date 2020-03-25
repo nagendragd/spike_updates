@@ -34,7 +34,7 @@ processor_t::processor_t(const char* isa, const char* priv, const char* varch,
   parse_varch_string(varch);
   register_base_instructions();
   mmu = new mmu_t(sim, this);
-  BUFFER_BASE = (1024*1024*1024);
+  BUFFER_BASE = (3*1024*1024*1024);
   BUFFER_RANGE = (8*1024);
   bc = new buffer_controller_t(mmu, VU.VLEN/8);
   initialize_delays(timing);
