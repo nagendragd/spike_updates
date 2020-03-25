@@ -25,26 +25,9 @@ int main(int argc, char** argv)
   parser.option(0, "isa", 1, [&](const char* s){isa = s;});
   parser.parse(argv);
 
-  std::string lowercase;
-  for (const char *p = isa; *p; p++)
-    lowercase += std::tolower(*p);
-
-  int xlen;
-  if (lowercase.compare(0, 4, "rv32") == 0) {
-    xlen = 32;
-  } else if (lowercase.compare(0, 4, "rv64") == 0) {
-    xlen = 64;
-  } else {
-    fprintf(stderr, "bad ISA string: %s\n", isa);
-    return 1;
-  }
-
-  disassembler_t* disassembler = new disassembler_t(xlen);
-  if (extension) {
-    for (auto disasm_insn : extension()->get_disasms()) {
-      disassembler->add_insn(disasm_insn);
-    }
-  }
+  processor_t p(isa, DEFAULT_PRIV, DEFAULT_VARCH, DEFAULT_TIMING, 0, 0);
+  if (extension)
+    p.register_extension(extension());
 
   while (getline(cin, s))
   {
@@ -69,7 +52,7 @@ int main(int argc, char** argv)
       if (nbits < 64)
         bits = bits << (64 - nbits) >> (64 - nbits);
 
-      string dis = disassembler->disassemble(bits);
+      string dis = p.get_disassembler()->disassemble(bits);
       s = s.substr(0, start) + dis + s.substr(endp - &s[0] + 1);
       pos = start + dis.length();
     }

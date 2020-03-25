@@ -7,7 +7,6 @@
 #include "simif.h"
 #include "mmu.h"
 #include "disasm.h"
-#include "buffer_controller.h"
 #include <cinttypes>
 #include <cmath>
 #include <cstdlib>
@@ -17,12 +16,14 @@
 #include <stdexcept>
 #include <string>
 #include <algorithm>
+#include "buffer_controller.h"
 
 #undef STATE
 #define STATE state
 
 processor_t::processor_t(const char* isa, const char* priv, const char* varch,
-                         simif_t* sim, uint32_t id, bool halt_on_reset)
+                         const char* timing, simif_t* sim, uint32_t id, 
+                         bool halt_on_reset)
   : debug(false), halt_request(false), sim(sim), ext(NULL), id(id), xlen(0),
   histogram_enabled(false), log_commits_enabled(false),
   halt_on_reset(halt_on_reset), last_pc(1), executions(1), num_insn(0)
@@ -33,9 +34,11 @@ processor_t::processor_t(const char* isa, const char* priv, const char* varch,
   parse_varch_string(varch);
   register_base_instructions();
   mmu = new mmu_t(sim, this);
-  bc = new buffer_controller_t(mmu, VU.VLEN/8);
-  BUFFER_BASE = (4*1024*1024);
+  BUFFER_BASE = (1024*1024*1024);
   BUFFER_RANGE = (8*1024);
+  bc = new buffer_controller_t(mmu, VU.VLEN/8);
+  initialize_delays(timing);
+  cycles = 0;
 
   disassembler = new disassembler_t(max_xlen);
   if (ext)
@@ -328,6 +331,7 @@ void processor_t::reset()
 
   // reset statistic
   num_insn = 0;
+  cycles = 0;
 }
 
 // Count number of contiguous 0 bits starting from the LSB.
@@ -805,7 +809,8 @@ reg_t processor_t::get_csr(int which)
     case CSR_INSTRET:
     case CSR_CYCLE:
       if (ctr_ok)
-        return state.minstret;
+        //return state.minstret;
+        return cycles;
       break;
     case CSR_MINSTRET:
     case CSR_MCYCLE:
@@ -813,7 +818,8 @@ reg_t processor_t::get_csr(int which)
     case CSR_INSTRETH:
     case CSR_CYCLEH:
       if (ctr_ok && xlen == 32)
-        return state.minstret >> 32;
+        //return state.minstret >> 32;
+        return cycles >> 32;
       break;
     case CSR_MINSTRETH:
     case CSR_MCYCLEH:
