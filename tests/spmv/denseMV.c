@@ -8,6 +8,22 @@
 //#include <context_sr_macros.h>
 //#include <setup.h>
 
+bool tooLarge (int nr, int nc)
+{
+   // we can not handle matrices that require more than 1GB mem
+   // 1GB is 2^30 == > 2^28 4-byte elements.
+
+   unsigned long int ne=nr*nc;
+   if (ne >= 1073741824) return true;
+   return false;
+}
+
+void handleError(int nr, int nc)
+{
+   printf("Size of matrix exceeds simulator capacity!\n");
+   exit(0);
+}
+
 void loadConstantToReg(char * name, int address, int reg, int*lower_12);
 
 unsigned long read_cycles(void)
@@ -23,6 +39,9 @@ int *y=0;
 volatile int last_op;
 int n;
 int n_lower_12;
+int g_nnz=0;
+char g_file_name[1024];
+double sparsity;
 
 int num_r, num_c, num_nz;
 
@@ -46,7 +65,7 @@ int t; // just for verification
 int t_lower_12;
 int t_upper_20;
 
-unsigned long HELPER_BASE = (1024*1024*1024); // modify this base
+unsigned long HELPER_BASE = (3*1024*1024*1024); // modify this base
 int helper_base_lower_12;
 int helper_base_upper_20;
 
@@ -60,8 +79,9 @@ void initSparse()
     printf("vals at 0x%x\n", &vals[0]);
 
     int k=0;
-    int nnz;
+    int nnz=0;
     rows[0]=0;
+    g_nnz=0;
     for (int i=0;i<n;i++)
     {
        nnz=0;
@@ -72,6 +92,7 @@ void initSparse()
               vals[k] = m[i*n+j];
               k++;
               nnz++;
+              g_nnz++;
            }  
        }
        while (nnz % 8) {
@@ -82,6 +103,8 @@ void initSparse()
        }
        rows[i+1]=rows[i]+nnz;
     }
+
+    sparsity = (n*n - g_nnz)/((double)n*n);
 }
 
 void execSparseScalar(void)
@@ -787,6 +810,7 @@ int main(int argc, char ** argv)
     if (strcmp(argv[1],"1") == 0) do_compile_exec = true;
 
     FILE*fp = fopen(argv[3],"r");
+    strcpy(g_file_name, argv[3]);
     if (!fp) { printf("Could not open %s for reading.\n", argv[3]); return 0;}
     matrix_type_t matrix_type;
     if (strcmp(argv[2], "0")==0) matrix_type=DENSE;
@@ -796,6 +820,7 @@ int main(int argc, char ** argv)
 
     if (matrix_type == DENSE) {
         fscanf(fp, "%d\n", &n);
+        if (tooLarge(n, n)) handleError(n, n);
         m = (int*)malloc(n*n*sizeof(int));
         v = (int*)malloc((n+8)*sizeof(int));
         y = (int*)malloc((n+8)*sizeof(int));
@@ -819,7 +844,8 @@ int main(int argc, char ** argv)
             if (matrix_sz_found) {
                 int r, c, v_i;
                 float v_f;
-                sscanf(line, "%d %d %f\n", &r, &c, &v_f);
+                sscanf(line, "%d %d %f", &r, &c, &v_f);
+                if ((v_f < 0.0001) && (v_f > -0.9999)) v_f = 1.0;
                 v_i = (int) v_f;
                 m[(r-1)*num_c+(c-1)]=v_i;
             } else {
@@ -829,6 +855,7 @@ int main(int argc, char ** argv)
                     return 0;
                 }
                 matrix_sz_found = 1;
+                if (tooLarge(num_r, num_c)) handleError(num_r, num_c);
                 m = (int*)malloc(num_r*num_c*sizeof(int));
                 v = (int*)malloc((num_c+8)*sizeof(int));
                 y = (int*)malloc((num_c+8)*sizeof(int));
@@ -902,7 +929,7 @@ int main(int argc, char ** argv)
     }
     //restore_regs();
     e = read_cycles();
-    printf("Took %ld cycles\n", e-s);
+    printf("Input: %s; Matrix Dim: %d by %d; NNZ: %d; Sparsity: %g; Took %ld cycles\n", g_file_name, n, n, g_nnz, sparsity, e-s);
     
     // check contents of y.
     printf("Last expected: %d\n", last_op);
