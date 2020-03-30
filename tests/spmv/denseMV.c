@@ -33,6 +33,8 @@ unsigned long read_cycles(void)
   return cycles;
 }
 
+int v_size=8;
+
 int *m=0;
 int *v=0;
 int *y=0;
@@ -761,7 +763,6 @@ void execDenseVector(void)
         //if (v_lower_12 & 0x800) sub_r13_r13_r12_macro;
         cp_r13_r29_macro;        
 
-        // init v28 to 0. or at least v28[0].
         for (int j=0;j<n; j+= 8)
         {
             vlwv_v10_r10_macro; // load next vector from M[.][]
@@ -850,6 +851,8 @@ int main(int argc, char ** argv)
                 m[(r-1)*num_c+(c-1)]=v_i;
             } else {
                 sscanf(line, "%d %d %d\n", &num_r, &num_c, &num_nz);
+                if (num_r % v_size) num_r += (v_size - (num_r % v_size));
+                if (num_c % v_size) num_c += (v_size - (num_c % v_size));
                 if (num_r != num_c) {
                     printf("Non-square matrices are not yet supported\n");
                     return 0;
@@ -893,7 +896,7 @@ int main(int argc, char ** argv)
     genHWHelper();
     execDenseScalar();
 
-#define COMPARE (121)
+#define COMPARE (1)
     last_op = y[COMPARE];
     printf("last_op is %d\n", last_op);
     y[COMPARE] = last_op -1;
@@ -929,7 +932,7 @@ int main(int argc, char ** argv)
     }
     //restore_regs();
     e = read_cycles();
-    printf("Input: %s; Matrix Dim: %d by %d; NNZ: %d; Sparsity: %g; Took %ld cycles\n", g_file_name, n, n, g_nnz, sparsity, e-s);
+    printf("Input: %s; Matrix Dim: %d by %d; NNZ: %d; Sparsity: %g; Cycles:%ld\n", g_file_name, n, n, g_nnz, sparsity, e-s);
     
     // check contents of y.
     printf("Last expected: %d\n", last_op);
