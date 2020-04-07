@@ -5,8 +5,14 @@
 #endif
 #include <stdlib.h>
 #include <string.h>
+#ifndef RISCV
+#include <stdint.h>
+#endif
 //#include <context_sr_macros.h>
 //#include <setup.h>
+
+const int v_size = 8;
+int nr_a, nr_b, nc_a, nc_b;
 
 bool tooLarge (int nr, int nc)
 {
@@ -26,16 +32,47 @@ void handleError(int nr, int nc)
 
 void loadConstantToReg(char * name, int address, int reg, int*lower_12);
 
-unsigned long read_cycles(void)
+
+void parseTAMU(FILE * fp, int **m, int *nr, int *nc)
 {
-  unsigned long cycles;
+    char line[1024];
+    int matrix_sz_found=0;
+    int num_r, num_c, num_nz;
+    while (fgets(&line[0], 1024, fp))
+    {
+        if (line[0] == '%') continue;
+        if (matrix_sz_found) {
+            int r, c, v_i;
+            float v_f;
+            sscanf(line, "%d %d %f", &r, &c, &v_f);
+            if ((v_f < 0.0001) && (v_f > -0.9999)) v_f = 1.0;
+            v_i = (int) v_f;
+            (*m)[(r-1)*num_c+(c-1)]=v_i;
+        } else {
+            sscanf(line, "%d %d %d\n", &num_r, &num_c, &num_nz);
+            if (num_r % v_size) num_r += (v_size - (num_r % v_size));
+            if (num_c % v_size) num_c += (v_size - (num_c % v_size));
+            matrix_sz_found = 1;
+            if (tooLarge(num_r, num_c)) handleError(num_r, num_c);
+            *m = (int*)malloc(num_r*num_c*sizeof(int));
+            for (int i=0;i<num_r;i++) 
+            for (int j=0;j<num_c;j++)
+                (*m)[i*num_c + j]=0;
+            *nr = num_r;
+            *nc = num_c;
+            printf("Matrix dimensions %d by %d\n", num_r, num_c);
+        }
+    } 
+}
+
+uint64_t read_cycles(void)
+{
+  uint64_t cycles = 0;
   asm volatile ("rdcycle %0" : "=r" (cycles));
   return cycles;
 }
 
 int *c=0;
-int n;
-double sparsity;
 
 // CSR representation of matrix A.
 char a_file_name[1024];
@@ -75,38 +112,36 @@ void freeMem(void)
     free(b_vals); 
 }
 
-void initSparse(int * m, int *rows, int*cols, int* vals, int *g_nnz)
+void initSparse(int r, int c, int * m, int *rows, int*cols, int* vals, int *g_nnz)
 {
     int k=0;
     int nnz=0;
     rows[0]=0;
     *g_nnz=0;
-    for (int i=0;i<n;i++)
+    for (int i=0;i<r;i++)
     {
        nnz=0;
-       for (int j=0;j<n;j++)
+       for (int j=0;j<c;j++)
        {
-           if (m[i*n+j] != 0) {
+           if (m[i*c+j] != 0) {
               cols[k] = j;
-              vals[k] = m[i*n+j];
+              vals[k] = m[i*c+j];
               k++;
               nnz++;
               (*g_nnz)++;
            }  
        }
        while (nnz % 8) {
-          cols[k] = n;
+          cols[k] = c-1;
           vals[k] = 0;
           k++;
           nnz++;
        }
        rows[i+1]=rows[i]+nnz;
     }
-
-    sparsity = (n*n - *g_nnz)/((double)n*n);
 }
 
-void initTransposeSparse(int * m, int *cols, int*rows, int* vals, int *g_nnz)
+void initTransposeSparse(int r, int c, int * m, int *cols, int*rows, int* vals, int *g_nnz)
 {
     // m is a matrix organized in row major order.
     // generate a CSC representation of it.
@@ -114,21 +149,21 @@ void initTransposeSparse(int * m, int *cols, int*rows, int* vals, int *g_nnz)
     int nnz=0;
     cols[0]=0;
     *g_nnz=0;
-    for (int i=0;i<n;i++)
+    for (int i=0;i<c;i++)
     {
        nnz=0;
-       for (int j=0;j<n;j++)
+       for (int j=0;j<r;j++)
        {
-           if (m[j*n+i] != 0) {
+           if (m[j*c+i] != 0) {
               rows[k] = j;
-              vals[k] = m[j*n+i];
+              vals[k] = m[j*c+i];
               k++;
               nnz++;
               (*g_nnz)++;
            }  
        }
        while (nnz % 8) {
-          rows[k] = n;
+          rows[k] = r;
           vals[k] = 0;
           k++;
           nnz++;
@@ -150,12 +185,12 @@ void execSparseScalar(void)
     int pos_a;
     int pos_b;
 
-    for (int i=0;i<n;i++)
+    for (int i=0;i<nr_a;i++)
     {
         nnz_a = a_rows[i+1] - a_rows[i]; 
-        for (int j=0;j<n;j++)
+        for (int j=0;j<nc_b;j++)
         {
-            c[i*n+j] = 0;
+            c[i*nc_b+j] = 0;
             nnz_bt = bt_rows[j+1] - bt_rows[j]; 
 
             // go over indices of row of A
@@ -168,8 +203,34 @@ void execSparseScalar(void)
                 while ((pos_b < bt_rows[j+1]) && (bt_cols[pos_b] < a_cols[pos_a])) {
                     pos_b++; 
                 }
-                if (bt_cols[pos_b] == a_cols[pos_a]) c[i*n+j] += bt_vals[pos_b]*a_vals[pos_a];
+                if (bt_cols[pos_b] == a_cols[pos_a]) c[i*nc_b+j] += bt_vals[pos_b]*a_vals[pos_a];
                 pos_a++;
+            }
+        }
+    }
+}
+
+void execSparseScalarGustavson()
+{
+    int nnz_a;
+    int nnz_b;
+    int col_a;
+    int a_idx;
+    int b_idx;
+
+    for (int i=0;i<nr_a;i++)
+    {
+        nnz_a = a_rows[i+1] - a_rows[i]; 
+        for (int k=0; k<nnz_a; k++)
+        {
+            a_idx = k + a_rows[i];
+            col_a = a_cols[a_idx]; // a[i][a_cols[k]]; 
+            
+            nnz_b = b_rows[col_a + 1] - b_rows[col_a];
+            for (int j=0;j<nnz_b;j++)
+            {
+                b_idx = j + b_rows[col_a];
+                c[i*nc_b + b_cols[b_idx]] += a_vals[a_idx]*b_vals[b_idx];
             }
         }
     }
@@ -216,14 +277,14 @@ void execDenseVector(void)
 
 void execMatMult(void)
 {
-    for (int i=0;i<n;i++)
+    for (int i=0;i<nr_a;i++)
     {
-        for (int j=0;j<n;j++)
+        for (int j=0;j<nc_b;j++)
         {
-            c[i*n+j] = 0;
-            for (int k=0;k<n; k++)
+            c[i*nc_b+j] = 0;
+            for (int k=0;k<nr_b; k++)
             {
-                c[i*n+j] += a[i*n+k]*b[k*n+j];
+                c[i*nc_b+j] += a[i*nc_a+k]*b[k*nr_b+j];
             }
         }
     }
@@ -231,11 +292,11 @@ void execMatMult(void)
 
 void clearC(void)
 {
-    for (int i=0;i<n;i++)
+    for (int i=0;i<nr_a;i++)
     {
-        for (int j=0;j<n;j++)
+        for (int j=0;j<nc_b;j++)
         {
-            c[i*n + j] = 0;
+            c[i*nc_b + j] = 0;
         }
     }
 }
@@ -244,17 +305,17 @@ void execDenseScalar(void)
 {
     // gustavson's works by pairwise multiplying 
     // and accumulating partial sums of rows.
-    for (int i=0;i<n;i++)
+    printf("started ..\n");
+    for (int i=0;i<nr_a;i++)
     {
-        for (int j=0;j<n;j++)
+        for (int j=0;j<nr_b;j++)
         {
             // i-th row of A and j-th row of B
             // multiply element A[i][j] with each element of B[j]
             // and accumulate product into corresponding element of C[i]
-            c[i*n+j] = 0;
-            for (int k=0;k<n;k++)
+            for (int k=0;k<nc_b;k++)
             {
-                c[i*n + k] += a[i*n + j]*b[j*n + k]; 
+                c[i*nc_b + k] += a[i*nc_a + j]*b[j*nc_b + k]; 
             }
         }
     }
@@ -298,18 +359,20 @@ int main(int argc, char ** argv)
     else { printf("Unknown matrix type.\n"); usage(); return 0;}
 
     if (matrix_type == DENSE) {
-        fscanf(a_fp, "%d\n", &n);
-        fscanf(b_fp, "%d\n", &t);
-        if (n != t) {
+        fscanf(a_fp, "%d\n", &nr_a);
+        nr_a = nc_a;
+        fscanf(b_fp, "%d\n", &nr_b);
+        nr_b = nc_b;
+        if (nc_a != nr_b) {
             printf("Matrices are incompatible in size. Can't be multiplied.\n");
             exit(0);
         }
-        if (tooLarge(n, n)) handleError(n, n);
-        a = (int*)malloc(n*n*sizeof(int));
-        b = (int*)malloc(n*n*sizeof(int));
-        c = (int*)malloc(n*n*sizeof(int));
-        for (int i=0;i<n*n;i++) fscanf(a_fp,"%d\n", &a[i]);
-        for (int i=0;i<n*n;i++) fscanf(b_fp,"%d\n", &b[i]);
+        if (tooLarge(nr_a, nc_a)) handleError(nr_a, nc_a);
+        a = (int*)malloc(nr_a*nc_a*sizeof(int));
+        b = (int*)malloc(nr_b*nc_b*sizeof(int));
+        c = (int*)malloc(nr_a*nc_b*sizeof(int));
+        for (int i=0;i<nr_a*nc_a;i++) fscanf(a_fp,"%d\n", &a[i]);
+        for (int i=0;i<nr_b*nc_b;i++) fscanf(b_fp,"%d\n", &b[i]);
     }
     else if (matrix_type == CSR) {
         printf("Format as yet unsupported\n");
@@ -318,21 +381,27 @@ int main(int argc, char ** argv)
         // Read TAMU Matrix Market formatted input
         // Assumptions: commented lines start with %
         // Matrix COO indices are index-1 based and not index-0 based
-        printf("Format as yet unsupported\n");
-        return 0;
+        parseTAMU(a_fp, &a, &nr_a, &nc_a);
+        parseTAMU(b_fp, &b, &nr_b, &nc_b);
+        if (nc_a != nr_b) 
+        {
+            printf("Incompatible matrices can not be multiplied!\n");
+            return 0;
+        }
+        c = (int*)malloc(nr_a*nc_b*sizeof(int));
     }
-    a_rows = (int*) malloc((n+1)*sizeof(int));
-    a_cols = (int*) malloc((n+8)*(n+8)*sizeof(int));
-    a_vals = (int*) malloc((n+8)*(n+8)*sizeof(int));
-    b_rows = (int*) malloc((n+1)*sizeof(int));
-    b_cols = (int*) malloc((n+8)*(n+8)*sizeof(int));
-    b_vals = (int*) malloc((n+8)*(n+8)*sizeof(int));
-    bt_rows = (int*) malloc((n+1)*sizeof(int));
-    bt_cols = (int*) malloc((n+8)*(n+8)*sizeof(int));
-    bt_vals = (int*) malloc((n+8)*(n+8)*sizeof(int));
-    initSparse(a, a_rows, a_cols, a_vals, &a_nnz);
-    initSparse(b, b_rows, b_cols, b_vals, &b_nnz);
-    initTransposeSparse(b, bt_rows, bt_cols, bt_vals, &bt_nnz);
+    a_rows = (int*) malloc((nr_a+1)*sizeof(int));
+    a_cols = (int*) malloc((nr_a+8)*(nc_a+8)*sizeof(int));
+    a_vals = (int*) malloc((nr_a+8)*(nc_a+8)*sizeof(int));
+    b_rows = (int*) malloc((nr_b+1)*sizeof(int));
+    b_cols = (int*) malloc((nr_b+8)*(nc_b+8)*sizeof(int));
+    b_vals = (int*) malloc((nr_b+8)*(nc_b+8)*sizeof(int));
+    bt_rows = (int*) malloc((nc_b+1)*sizeof(int));
+    bt_cols = (int*) malloc((nr_b+8)*(nc_b+8)*sizeof(int));
+    bt_vals = (int*) malloc((nr_b+8)*(nc_b+8)*sizeof(int));
+    initSparse(nr_a, nc_a, a, a_rows, a_cols, a_vals, &a_nnz);
+    initSparse(nr_b, nc_b, b, b_rows, b_cols, b_vals, &b_nnz);
+    initTransposeSparse(nr_b, nc_b, b, bt_rows, bt_cols, bt_vals, &bt_nnz);
 
     bool do_sparse = false;
     if (strcmp(argv[5],"1") == 0) do_sparse = true;
@@ -347,18 +416,18 @@ int main(int argc, char ** argv)
         exit(0);
     }
 
+    if (!do_compile_exec) { freeMem(); return 0;}
     execMatMult();
 
-#define COMPARE (n*n-1)
+#define COMPARE (nr_a*nc_b-1)
     last_op = c[COMPARE];
     printf("last_op is %d\n", last_op);
     clearC();
-    volatile unsigned long s, e;
+    volatile uint64_t s, e;
     //save_regs();
 #ifdef GENERATE_ONLY
     return 0;
 #else
-    if (!do_compile_exec) { freeMem(); return 0;}
     s = read_cycles();
     if (do_sparse)
     {
@@ -371,9 +440,10 @@ int main(int argc, char ** argv)
             execHWHelper();
         }
         else
-            execSparseScalar();
+            execSparseScalarGustavson();
     }
-    else {
+    else 
+    {
         if (use_vectors)
         {
             execDenseVector();
@@ -385,7 +455,7 @@ int main(int argc, char ** argv)
     }
     //restore_regs();
     e = read_cycles();
-    printf("Matrix A: %s; %d by %d; Matrix B: %s; %d by %d; Cycles: %ld\n", a_file_name, n, n, b_file_name, n, n, e-s);
+    printf("Matrix A: %s; %d by %d; Matrix B: %s; %d by %d; Cycles: %ld\n", a_file_name, nr_a, nc_a, b_file_name, nr_b, nc_b, (unsigned long ) (e-s));
     
     // check contents of y.
     printf("Last expected: %d\n", last_op);

@@ -1,3 +1,3 @@
 #!/bin/sh
-riscv32-unknown-elf-g++ -O3 -fpermissive -I. -c generate.c
-riscv32-unknown-elf-g++ -O3 -fpermissive -I. spMspM.c generate.o
+riscv32-unknown-elf-g++ -O3 -march=rv32imafdc -I. -c generate.c
+riscv32-unknown-elf-g++ -O3 -march=rv32imafdc -I. spMspM.c generate.o
