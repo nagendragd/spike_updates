@@ -72,7 +72,13 @@ uint64_t read_cycles(void)
   return cycles;
 }
 
+// output matrix C
 int *c=0;
+// CSR representation of matrix C.
+int * c_rows;
+int * c_cols;
+int * c_vals;
+int c_nnz=0;
 
 // CSR representation of matrix A.
 char a_file_name[1024];
@@ -184,14 +190,17 @@ void execSparseScalar(void)
     int nnz_bt;
     int pos_a;
     int pos_b;
+    c_nnz = 0;
 
     for (int i=0;i<nr_a;i++)
     {
         nnz_a = a_rows[i+1] - a_rows[i]; 
+        c_rows[i] = c_nnz;
         for (int j=0;j<nc_b;j++)
         {
             c[i*nc_b+j] = 0;
             nnz_bt = bt_rows[j+1] - bt_rows[j]; 
+
 
             // go over indices of row of A
             // see if matching index is found in column of B
@@ -203,11 +212,17 @@ void execSparseScalar(void)
                 while ((pos_b < bt_rows[j+1]) && (bt_cols[pos_b] < a_cols[pos_a])) {
                     pos_b++; 
                 }
-                if (bt_cols[pos_b] == a_cols[pos_a]) c[i*nc_b+j] += bt_vals[pos_b]*a_vals[pos_a];
+                if (bt_cols[pos_b] == a_cols[pos_a]) {
+                    c[i*nc_b+j] += bt_vals[pos_b]*a_vals[pos_a];
+                    c_cols[c_nnz] = a_cols[pos_a];
+                    c_vals[c_nnz] = bt_vals[pos_b]*a_vals[pos_a];
+                    c_nnz++;
+                }
                 pos_a++;
             }
         }
     }
+    c_rows[nr_a] = c_nnz;
 }
 
 void execSparseScalarGustavson()
@@ -234,6 +249,9 @@ void execSparseScalarGustavson()
             }
         }
     }
+
+    // if we want sparse output, then dense c[] must be converted
+    initSparse(nr_a, nc_b, c, c_rows, c_cols, c_vals, &c_nnz);
 }
 
 void genSparseVector(void)
@@ -305,7 +323,6 @@ void execDenseScalar(void)
 {
     // gustavson's works by pairwise multiplying 
     // and accumulating partial sums of rows.
-    printf("started ..\n");
     for (int i=0;i<nr_a;i++)
     {
         for (int j=0;j<nr_b;j++)
@@ -399,6 +416,9 @@ int main(int argc, char ** argv)
     bt_rows = (int*) malloc((nc_b+1)*sizeof(int));
     bt_cols = (int*) malloc((nr_b+8)*(nc_b+8)*sizeof(int));
     bt_vals = (int*) malloc((nr_b+8)*(nc_b+8)*sizeof(int));
+    c_rows = (int*)malloc((nr_a+1)*sizeof(int));
+    c_cols = (int*)malloc((nr_a+8)*(nc_b+8)*sizeof(int));
+    c_vals = (int*)malloc((nr_a+8)*(nc_b+8)*sizeof(int));
     initSparse(nr_a, nc_a, a, a_rows, a_cols, a_vals, &a_nnz);
     initSparse(nr_b, nc_b, b, b_rows, b_cols, b_vals, &b_nnz);
     initTransposeSparse(nr_b, nc_b, b, bt_rows, bt_cols, bt_vals, &bt_nnz);
@@ -440,7 +460,10 @@ int main(int argc, char ** argv)
             execHWHelper();
         }
         else
-            execSparseScalarGustavson();
+        {
+            //execSparseScalarGustavson();
+            execSparseScalar();
+        }
     }
     else 
     {
