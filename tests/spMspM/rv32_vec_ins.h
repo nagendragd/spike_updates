@@ -82,6 +82,7 @@
 
 #define OP_IMM (0b0010011)
 #define OP_LUI (0b0110111)
+#define OP_ADD_R_R (0b0110011)
 #define OP_SUB_R_R (0b0110011)
 #define OP_LDW (0b0000011)
 #define OP_STW (0b0100011)
@@ -90,6 +91,7 @@
 #define FUNCT3_ADDI (0b000)
 #define FUNCT3_ORI  (0b110)
 #define FUNCT3_SRLI (0b101)
+#define FUNCT3_ADD_R_R  (0b000)
 #define FUNCT3_SUB_R_R  (0b000)
 #define FUNCT3_LDW  (0b010)
 #define FUNCT3_STW  (0b010)
@@ -98,6 +100,7 @@
 #define FUNCT3_BLT  (0b100)
 #define FUNCT3_BGE  (0b101)
 
+#define FUNCT7_ADD_R_R (0b0000000)
 #define FUNCT7_SUB_R_R (0b0100000)
 
 #define FUNCT6_VADD_VV (0b000000)
@@ -135,6 +138,7 @@
 #define STW(rd, rs, imm) (OP_STW | ((imm & 0x1f) << 7) | (rd << 15) | (FUNCT3_STW << 12) | (rs << 20) | (((imm >> 5) & 0x7f ) << 25)) 
 
 #define SUB_R_R(rd, rs1, rs2) (OP_SUB_R_R | (rd << 7) | (FUNCT3_SUB_R_R << 12) | (rs1 << 15) | (rs2 << 20) | (FUNCT7_SUB_R_R << 25) )
+#define ADD_R_R(rd, rs1, rs2) (OP_ADD_R_R | (rd << 7) | (FUNCT3_ADD_R_R << 12) | (rs1 << 15) | (rs2 << 20) | (FUNCT7_ADD_R_R << 25) )
 
 #define BLT(rs1, rs2, imm) ( OP_BRANCH | (((imm >> 11) & 0x1) << 7) | (((imm >> 1) & 0xf) << 8) | (FUNCT3_BLT << 12) | (rs1 << 15) | (rs2 << 20) | (((imm >> 5) & 0x3f) << 25) | (((imm >> 12) & 0x1) << 31) )
 
@@ -157,6 +161,7 @@
 #define VSETVLI(rd, rs1, imm) (OP_V | (rd << 7) | (0b111 << 12) | (rs1 << 15) | (imm << 20))
 
 #define VLWV(vd, rs1) ( 0b0000111 | (vd << 7) | (0b110 << 12) | (rs1 << 15) | (0b00000 << 20) | (0b1<<25) | (0b000<<26) | (0b000<<29) )
+#define VLWVS(vd, rs1, rs2) ( 0b0000111 | (vd << 7) | (0b110 << 12) | (rs1 << 15) | (rs2 << 20) | (0b1<<25) | (0b010<<26) | (0b000<<29) )
 #define VLIWV(vd, rs1, vs2) ( 0b0000111 | (vd << 7) | (0b110 << 12) | (rs1 << 15) | (vs2 << 20) | (0b1<<25) | (0b011<<26) | (0b000<<29) )
 
 #define VSWV(rs, vs) ( 0b0100111 | (vs << 7) | (0b110 << 12) | (rs << 15) | (0b00000 << 20) | (0b1<<25) | (0b000<<26) | (0b000<<29) )
