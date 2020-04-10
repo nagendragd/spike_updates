@@ -30,7 +30,7 @@ void handleError(int nr, int nc)
    exit(0);
 }
 
-void loadConstantToReg(char * name, int address, int reg, int*lower_12);
+void loadConstantToReg(char * name, int address, int reg, int reg2, int*lower_12);
 
 
 void parseTAMU(FILE * fp, int **m, int *nr, int *nc)
@@ -74,6 +74,8 @@ uint64_t read_cycles(void)
 
 // output matrix C
 int *c=0;
+int c_lower_12;
+int c_upper_20;
 // CSR representation of matrix C.
 int * c_rows;
 int * c_cols;
@@ -83,6 +85,8 @@ int c_nnz=0;
 // CSR representation of matrix A.
 char a_file_name[1024];
 int *a=0;
+int a_lower_12;
+int a_upper_20;
 int * a_rows;
 int * a_cols;
 int * a_vals;
@@ -91,6 +95,12 @@ int a_nnz=0;
 // CSR representation of matrix B.
 char b_file_name[1024];
 int *b=0;
+int b_lower_12;
+int b_upper_20;
+int b_row_size_lower_12;
+int b_row_size_upper_20;
+int b_stride_lower_12;
+int b_stride_upper_12;
 int * b_rows;
 int * b_cols;
 int * b_vals;
@@ -258,7 +268,7 @@ void genSparseVector(void)
 {
 }
 
-void loadConstantToReg(char * name, int address, int reg, int*var_lower_12)
+void loadConstantToReg(char * name, int address, int reg, int reg2, int*var_lower_12)
 {
     int upper_20 = address;
     int lower_12 = address;
@@ -270,8 +280,8 @@ void loadConstantToReg(char * name, int address, int reg, int*var_lower_12)
     generateAsm(str, LD_IMM(reg, upper_20));
     sprintf(&str[0], "add_r%d_r%d_imm_%s_lower_12_macro", reg, reg, name);
     generateAsm(str, ADD_IMM(reg, reg, lower_12));
-    sprintf(&str[0], "sub_r%d_r%d_r12_macro", reg, reg);
-    generateAsm(&str[0], SUB_R_R(reg, reg, R12));
+    sprintf(&str[0], "sub_r%d_r%d_r%d_macro", reg, reg, reg2);
+    generateAsm(&str[0], SUB_R_R(reg, reg, reg2));
 }
 
 void genHWHelper(void)
@@ -285,10 +295,112 @@ void execSparseVector(void)
 
 void execHWHelper(void)
 {
+
 }
 
 void execDenseVector(void)
 {
+    // VL: 256 bits
+    add_r6_r0_imm_256_macro;
+
+    // SEW: 32 bits
+    vsetvli_r7_r6_e32_macro;
+
+    // init R27 to 0xfffff
+    ld_r27_imm_0xfffff_macro;
+
+    // load A to R24
+    ld_r24_a_upper_20_macro;
+    add_r24_r24_imm_a_lower_12_macro;
+    if (a_lower_12 & 0x800) sub_r24_r24_r27_macro;
+
+    // load B to R25
+    ld_r25_b_upper_20_macro;
+    add_r25_r25_imm_b_lower_12_macro;
+    if (b_lower_12 & 0x800) sub_r25_r25_r27_macro;
+
+    // load B's row size (bytes) to R31
+    ld_r31_b_row_size_upper_20_macro;
+    add_r31_r31_imm_b_row_size_lower_12_macro;
+    if (b_row_size_lower_12 & 0x800) sub_r31_r31_r27_macro;
+
+    // load B's stride (bytes) to R23
+    ld_r23_b_stride_upper_20_macro;
+    add_r23_r23_imm_b_stride_lower_12_macro;
+    if (b_stride_lower_12 & 0x800) sub_r23_r23_r27_macro;
+
+    // save B to R29
+    cp_r29_r25_macro;
+
+    // load C to R26
+    ld_r26_c_upper_20_macro;
+    add_r26_r26_imm_c_lower_12_macro;
+    if (c_lower_12 & 0x800) sub_r26_r26_r27_macro;
+
+    for (int i=0;i<nr_a;i++)
+    {
+        // save present A address to R30
+        cp_r30_r24_macro;
+
+        // load base of B back from R29
+        // cp_r25_r29_macro;
+
+        // load base of B back into R22
+        // we use R22 to move by columns of B
+        // R25 holds the current address in B we are loading from
+        cp_r22_r29_macro;
+
+        for (int j=0;j<nc_b;j++)
+        {
+            // c[i*nc_b+j] = 0;
+
+            // reset A to row i
+            cp_r24_r30_macro;
+
+            // reset B to col j
+            cp_r25_r22_macro;
+
+            for (int k=0;k<nr_b; k+=8)
+            {
+                //c[i*nc_b+j] += a[i*nc_a+k]*b[k*nr_b+j];
+    
+                // load vector from address of A into V1
+                vlwv_v1_r24_macro;
+
+                // load vector -strided from address of B into V2
+                vlwvs_v2_r25_r31_macro;
+                //vlwv_v2_r25_macro;
+
+                // pairwise multiply
+                vmul_vv_v3_v1_v2_vm_macro;
+
+                // reduce
+                vredsum_vs_v4_v4_v3_macro;
+
+                // increment A by vector size
+                add_24_24_imm_32_macro;
+
+                // increment B by VLEN * stride
+                add_r25_r25_r23_macro;
+            }
+            // store to C
+            vswv_r26_v4_macro;
+
+            // advance C by 4 bytes
+            add_26_26_imm_4_macro;
+
+            // clear cumulator v4
+            reset_v4_r0_macro;
+
+            // move B to next column.
+            // this is just loading current B
+            // adding 4
+            add_22_22_imm_4_macro;
+        }
+
+        // move A to next row i -- which is just adding 32B to where we are
+        add_24_24_imm_32_macro;
+    }
 }
 
 #endif
@@ -340,6 +452,80 @@ void execDenseScalar(void)
 
 void genDenseVector(void)
 {
+    printf("A matrix is at %p\n", a);
+    printf("B matrix is at %p\n", b);
+    printf("C matrix is at %p\n", c);
+    generateAsm("add_r6_r0_imm_256_macro", ADD_IMM(R6,R0,256));
+    generateAsm("vsetvli_r7_r6_e32_macro", VSETVLI(R7, R6, (E32 << VSEW_OFFSET)));
+
+    // load address of A into R24
+    loadConstantToReg("a", (int)a, R24, R27, &a_lower_12);
+    // load address of B into R25
+    loadConstantToReg("b", (int)b, R25, R27, &b_lower_12);
+    // load address of C into R26
+    loadConstantToReg("c", (int)c, R26, R27, &c_lower_12);
+
+    // load row size of B into R31
+    loadConstantToReg("b_row_size", nc_b*4, R31, R27, &b_row_size_lower_12);
+
+    // load VLEN * row size of B into R23
+    loadConstantToReg("b_stride", nc_b*4*v_size, R23, R27, &b_stride_lower_12);
+
+    // move B's present access point by stride
+    generateAsm("add_r25_r25_r23_macro", ADD_R_R(R25, R25, R23));
+
+    // load 0xfffff into R27 for address constant adjustment
+    generateAsm("ld_r27_imm_0xfffff_macro", LD_IMM(R27, 0xfffff));
+    generateAsm("sub_r24_r24_r27_macro", SUB_R_R(R24,R24,R27));
+    generateAsm("sub_r25_r25_r27_macro", SUB_R_R(R25,R25,R27));
+    generateAsm("sub_r26_r26_r27_macro", SUB_R_R(R26,R26,R27));
+
+    // increment addresses A, B by 32 bytes.
+    generateAsm("add_24_24_imm_32_macro", ADD_IMM(R24,R24,0b000000100000));
+    generateAsm("add_25_25_imm_32_macro", ADD_IMM(R25,R25,0b000000100000));
+    generateAsm("add_25_25_imm_4_macro", ADD_IMM(R25,R25,0b000000000100));
+
+    // load vector from address of A into V1
+    generateAsm("vlwv_v1_r24_macro", VLWV(V1,R24));
+
+    // load vector from address of B into V2
+    generateAsm("vlwv_v2_r25_macro", VLWV(V2,R25));
+
+    // load vector -strided from address of B into V2
+    generateAsm("vlwvs_v2_r25_r31_macro", VLWVS(V2,R25,R31));
+
+    // Move B to next column
+    generateAsm("add_22_22_imm_4_macro", ADD_IMM(R22, R22, 4));
+
+    // generate a copy instruction to save address of A
+    generateAsm("cp_r30_r24_macro", ADD_IMM(R30, R24, 0));
+    // generate a copy instruction to restore address of A
+    generateAsm("cp_r24_r30_macro", ADD_IMM(R24, R30, 0));
+
+    // generate a copy instruction to save address of B
+    generateAsm("cp_r29_r25_macro", ADD_IMM(R29, R25, 0));
+    // generate a copy instruction to restore address of B
+    generateAsm("cp_r25_r29_macro", ADD_IMM(R25, R29, 0));
+    // generate a copy instruction to restore address of B
+    generateAsm("cp_r22_r29_macro", ADD_IMM(R22, R29, 0));
+
+    // restore to current B pointer from saved column pointer
+    generateAsm("cp_r25_r22_macro", ADD_IMM(R25, R22, 0));
+
+    // multiply pairwise V1 and V2
+    generateAsm("vmul_vv_v3_v1_v2_vm_macro", VMUL_VV(V3,V1,V2,VM));
+
+    // use V4 to hold cumulation
+    generateAsm("vredsum_vs_v4_v4_v3_macro", VREDSUM_VS(V4, V4, V3, VM));
+
+    // store V4 to address of C
+    generateAsm("vswv_r26_v4_macro", VSWV(R26,V4));
+
+    // increment address register holding address of C by 4 bytes
+    generateAsm("add_26_26_imm_4_macro", ADD_IMM(R26,R26,4));
+
+    // clear cumulator V4[0]
+    generateAsm("reset_v4_r0_macro", VMV_VX(V4,R0));
 }
 
 void usage(void)
@@ -387,7 +573,7 @@ int main(int argc, char ** argv)
         if (tooLarge(nr_a, nc_a)) handleError(nr_a, nc_a);
         a = (int*)malloc(nr_a*nc_a*sizeof(int));
         b = (int*)malloc(nr_b*nc_b*sizeof(int));
-        c = (int*)malloc(nr_a*nc_b*sizeof(int));
+        c = (int*)malloc((nr_a*nc_b + v_size)*sizeof(int));
         for (int i=0;i<nr_a*nc_a;i++) fscanf(a_fp,"%d\n", &a[i]);
         for (int i=0;i<nr_b*nc_b;i++) fscanf(b_fp,"%d\n", &b[i]);
     }
@@ -405,7 +591,7 @@ int main(int argc, char ** argv)
             printf("Incompatible matrices can not be multiplied!\n");
             return 0;
         }
-        c = (int*)malloc(nr_a*nc_b*sizeof(int));
+        c = (int*)malloc((nr_a*nc_b + v_size)*sizeof(int));
     }
     a_rows = (int*) malloc((nr_a+1)*sizeof(int));
     a_cols = (int*) malloc((nr_a+8)*(nc_a+8)*sizeof(int));
@@ -435,6 +621,9 @@ int main(int argc, char ** argv)
         printf("Invalid options: HW Helper option is only valid with sparse computation.\n");
         exit(0);
     }
+    genDenseVector();
+    genSparseVector();
+    genHWHelper();
 
     if (!do_compile_exec) { freeMem(); return 0;}
     execMatMult();
