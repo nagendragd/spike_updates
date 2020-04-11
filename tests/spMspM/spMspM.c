@@ -208,7 +208,7 @@ void execSparseScalar(void)
         c_rows[i] = c_nnz;
         for (int j=0;j<nc_b;j++)
         {
-            c[i*nc_b+j] = 0;
+            //c[i*nc_b+j] = 0;
             nnz_bt = bt_rows[j+1] - bt_rows[j]; 
 
 
@@ -217,18 +217,24 @@ void execSparseScalar(void)
             // do this efficiently
             pos_a = a_rows[i];
             pos_b = bt_rows[j];
+            bool atleast_once = 0;
+            int tmp=0;
             while (pos_a < a_rows[i+1])
             {
                 while ((pos_b < bt_rows[j+1]) && (bt_cols[pos_b] < a_cols[pos_a])) {
                     pos_b++; 
                 }
                 if (bt_cols[pos_b] == a_cols[pos_a]) {
-                    c[i*nc_b+j] += bt_vals[pos_b]*a_vals[pos_a];
-                    c_cols[c_nnz] = a_cols[pos_a];
-                    c_vals[c_nnz] = bt_vals[pos_b]*a_vals[pos_a];
-                    c_nnz++;
+                    atleast_once = 1;
+                    // c[i*nc_b+j] += bt_vals[pos_b]*a_vals[pos_a];
+                    tmp += bt_vals[pos_b]*a_vals[pos_a];
                 }
                 pos_a++;
+            }
+            if (atleast_once) {
+                c_cols[c_nnz] = j;
+                c_vals[c_nnz] = tmp;
+                c_nnz++;
             }
         }
     }
@@ -295,7 +301,38 @@ void execSparseVector(void)
 
 void execHWHelper(void)
 {
+    c_nnz = 0;
 
+    for (int i=0;i<nr_a;i++)
+    {
+        c_rows[i] = c_nnz;
+        for (int j=0;j<nc_b;j++)
+        {
+            c[i*nc_b+j] = 0;
+
+            bool flag = READ_FLAG_FROM_BUFFER_CONTROLLER;
+            // flag == true ==> data available for row i of A and col j of B
+            // flag == false ==> end of data
+            bool atleast_once = 0;
+            while (flag) 
+            {
+                VLOAD_BUF1_TO_V1; // BUF1 to values in row i of A
+                VLOAD_BUF2_TO_V2; // BUF2 to values in col j of B
+                VMUL_V3_V1_V2; // V3 = V1*V2 element-wise
+                VRED_V4_V3; // v4[0] = v4[0] + sum of elements of v3[.]
+                atleast_once = 1;
+                flag = READ_FLAG_FROM_BUFFER_CONTROLLER;
+            }
+            if (atleast_once) 
+            {
+                c_cols[c_nnz] = j;
+                c_vals[c_nnz] = V4[0];
+                c_nnz+=1;
+                V4[0] = 0; // clear for next iteration
+            }
+        }
+    }
+    c_rows[nr_a] = c_nnz;
 }
 
 void execDenseVector(void)
