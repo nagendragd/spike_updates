@@ -47,7 +47,7 @@ void parseTAMU(FILE * fp, int **m, int *nr, int *nc)
             sscanf(line, "%d %d %f", &r, &c, &v_f);
             if ((v_f < 0.0001) && (v_f > -0.9999)) v_f = 1.0;
             v_i = (int) v_f;
-            (*m)[(r-1)*num_c+(c-1)]=v_i;
+            (*m)[(r-1)*(*nc)+(c-1)]=v_i;
         } else {
             sscanf(line, "%d %d %d\n", &num_r, &num_c, &num_nz);
             if (num_r % v_size) num_r += (v_size - (num_r % v_size));
@@ -155,6 +155,18 @@ void initSparse(int r, int c, int * m, int *rows, int*cols, int* vals, int *g_nn
        }
        rows[i+1]=rows[i]+nnz;
     }
+
+#if 0
+    printf("CSR Rows\n");
+    for (int i=0;i<r;i++) printf("%d ", rows[i]);
+    printf("\n");
+    printf("CSR cols\n");
+    for (int i=0;i<k;i++) printf("%d ", cols[i]); 
+    printf("\n");
+    printf("CSR vals\n");
+    for (int i=0;i<k;i++) printf("%d ", vals[i]); 
+    printf("\n");
+#endif
 }
 
 void initTransposeSparse(int r, int c, int * m, int *cols, int*rows, int* vals, int *g_nnz)
@@ -301,6 +313,7 @@ void execSparseVector(void)
 
 void execHWHelper(void)
 {
+#if 0
     c_nnz = 0;
 
     for (int i=0;i<nr_a;i++)
@@ -333,6 +346,7 @@ void execHWHelper(void)
         }
     }
     c_rows[nr_a] = c_nnz;
+#endif
 }
 
 void execDenseVector(void)
