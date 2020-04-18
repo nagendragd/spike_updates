@@ -132,6 +132,7 @@ void initSparse(int r, int c, int * m, int *rows, int*cols, int* vals, int *g_nn
 {
     int k=0;
     int nnz=0;
+    int rem;
     rows[0]=0;
     *g_nnz=0;
     for (int i=0;i<r;i++)
@@ -147,11 +148,13 @@ void initSparse(int r, int c, int * m, int *rows, int*cols, int* vals, int *g_nn
               (*g_nnz)++;
            }  
        }
-       while (nnz % 8) {
-          cols[k] = c-1;
+       rem = nnz % 8;
+       while (rem) {
+          cols[k] = c-rem;
           vals[k] = 0;
           k++;
           nnz++;
+          rem--;
        }
        rows[i+1]=rows[i]+nnz;
     }
@@ -175,6 +178,7 @@ void initTransposeSparse(int r, int c, int * m, int *cols, int*rows, int* vals, 
     // generate a CSC representation of it.
     int k=0;
     int nnz=0;
+    int rem;
     cols[0]=0;
     *g_nnz=0;
     for (int i=0;i<c;i++)
@@ -190,11 +194,13 @@ void initTransposeSparse(int r, int c, int * m, int *cols, int*rows, int* vals, 
               (*g_nnz)++;
            }  
        }
-       while (nnz % 8) {
-          rows[k] = r;
+       rem = nnz % 8;
+       while (rem) {
+          rows[k] = r - rem;
           vals[k] = 0;
           k++;
           nnz++;
+          rem--;
        }
        cols[i+1]=cols[i]+nnz;
     }
