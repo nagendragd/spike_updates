@@ -796,13 +796,13 @@ void usage(void)
 {
     printf("Program requires five args:\n");
     printf("Arg 1: 0 or 1 value -- 0 if only compile, 1 if compile+exec\n");
-    printf("Arg 2: 0 - dense matrix, 1 - CSR sparse matrix, 2 - TAMU COO sparse matrix\n");
+    printf("Arg 2: 0 - dense synth matrix, 1 - CSR sparse matrix, 2 - TAMU COO sparse matrix, 3 - DNN weight matrix\n");
     printf("Arg 3: matrix data file as input.\n");
     printf("Arg 4: 0 or 1 value -- 0 if doing dense, 1 if doing sparse\n");
     printf("Arg 5: 0/1/2 value -- 0 if using scalar, 1 if using vectors, 2 if using hardware helper (2 is valid only with sparse)\n");
 }
 
-typedef enum {DENSE=0, CSR=1, COO=2} matrix_type_t;
+typedef enum {DENSE=0, CSR=1, COO=2, DENSE_DNN=3} matrix_type_t;
 
 int main(int argc, char ** argv)
 {
@@ -817,6 +817,7 @@ int main(int argc, char ** argv)
     if (strcmp(argv[2], "0")==0) matrix_type=DENSE;
     else if (strcmp(argv[2], "1")==0) matrix_type=CSR;
     else if (strcmp(argv[2], "2")==0) matrix_type=COO;
+    else if (strcmp(argv[2], "3")==0) matrix_type=DENSE_DNN;
     else { printf("Unknown matrix type.\n"); usage(); return 0;}
 
     if (matrix_type == DENSE) {
@@ -829,6 +830,34 @@ int main(int argc, char ** argv)
         for (int i=0;i<n+8;i++) y[i] = 0;
         for (int i=0;i<n*n;i++) fscanf(fp,"%d\n", &m[i]);
         for (int i=0;i<n;i++) fscanf(fp,"%d\n", &v[i]);
+    } else if (matrix_type == DENSE_DNN) {
+	    int p, q;
+        fscanf(fp, "%d\n", &p);
+        fscanf(fp, "%d\n", &q);
+	    num_r=p; 
+	    num_c=q;
+	    if (num_r < num_c) num_r = num_c;
+	    else num_c = num_r;
+
+        if (num_r % v_size) num_r += (v_size - (num_r % v_size));
+        if (num_c % v_size) num_c += (v_size - (num_c % v_size));
+        if (tooLarge(num_r, num_c)) handleError(num_r, num_c);
+        m = (int*)malloc(num_r*num_c*sizeof(int));
+        v = (int*)malloc((num_c+8)*sizeof(int));
+        y = (int*)malloc((num_c+8)*sizeof(int));
+        for (int i=0;i<num_r;i++) 
+        for (int j=0;j<num_c;j++)
+            m[i*num_c + j]=0;
+        for (int i=0;i<num_c+8;i++) v[i] = 0;
+        for (int i=0;i<num_c+8;i++) y[i] = 0;
+            n=num_r;
+
+	    for (int i=0;i<p*q; i++) {
+             fscanf(fp, "%d\n", &m[i]);
+	    }
+	    for (int i=0;i<num_c; i++) {
+	         v[i] = i;
+	    }
     }
     else if (matrix_type == CSR) {
         printf("Format as yet unsupported\n");
