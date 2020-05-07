@@ -1,0 +1,4 @@
+#!/bin/sh
+run_MCU_DNN_Dense_Vector_Sizes.sh
+run_MCU_DNN_Sparse_Vector_Sizes.sh
+run_MCU_DNN_Helper_Vector_Sizes.sh
