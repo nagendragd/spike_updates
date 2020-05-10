@@ -26,15 +26,23 @@ void handleError(int nr, int nc)
 
 void loadConstantToReg(char * name, unsigned long address, int reg, int*lower_12);
 
-unsigned long read_cycles(void)
+unsigned long long read_cycles(void)
+#ifdef RISCV_BUILD
 {
   unsigned long cycles;
   asm volatile ("rdcycle %0" : "=r" (cycles));
-  return cycles;
+  return (unsigned long long)cycles;
 }
+#else
+{
+    unsigned int lo, hi;
+    __asm__ __volatile__ ("rdtsc" : "=a"(lo), "=d"(hi));
+    return ( (unsigned long long)lo)|( ((unsigned long long)hi)<<32 );
+}
+#endif
 
 int v_size=8;
-int vector_size;
+int vector_size = v_size;
 
 int *m=0;
 int *v=0;
@@ -64,6 +72,11 @@ int vals_lower_12;
 int vals_upper_20;
 int v_upper_20;
 
+// Bitvector representation of matrix M
+char * bitmap;
+// we do not create another values vector
+// for M as CSR vals is the same format.
+
 unsigned long HELPER_BASE = (3*1024*1024*1024);
 int helper_base_lower_12;
 int helper_base_upper_20;
@@ -73,7 +86,44 @@ int t; // just for verification
 int t_lower_12;
 int t_upper_20;
 
-void initSparse()
+typedef void (*PFN)(void);
+PFN exec_fn;
+typedef enum {S_DENSE=0, S_CSR=1, S_BV=2} storage_type_t;
+typedef enum {C_DENSE=0, C_CSR=1, C_BV=2, C_HHT_DENSE=3, C_HHT_SPARSE=4} compute_type_t;
+storage_type_t storage_type;
+compute_type_t compute_type;
+PFN assignExecuteFunction(storage_type_t storage_format, compute_type_t compute_format, int vector_size);
+
+void execDenseDenseScalar(void);
+void execDenseDenseVector2(void);
+void execDenseDenseVector4(void);
+void execDenseDenseVector8(void);
+void execHelperDenseCSRScalar(void);
+void execHelperDenseCSRVector2(void);
+void execHelperDenseCSRVector4(void);
+void execHelperDenseCSRVector8(void);
+void execHelperDenseBVScalar(void);
+void execHelperDenseBVVector2(void);
+void execHelperDenseBVVector4(void);
+void execHelperDenseBVVector8(void);
+void execHelperSparseCSRScalar(void);
+void execHelperSparseCSRVector2(void);
+void execHelperSparseCSRVector4(void);
+void execHelperSparseCSRVector8(void);
+void execHelperSparseBVScalar(void);
+void execHelperSparseBVVector2(void);
+void execHelperSparseBVVector4(void);
+void execHelperSparseBVVector8(void);
+void execCSRCSRScalar(void);
+void execCSRCSRVector2(void);
+void execCSRCSRVector4(void);
+void execCSRCSRVector8(void);
+void execBVBVScalar(void);
+void execBVBVVector2(void);
+void execBVBVVector4(void);
+void execBVBVVector8(void);
+
+void initCSR()
 {
     rows = (int*) malloc((n+1)*sizeof(int));
     cols = (int*) malloc((n+8)*(n+8)*sizeof(int));
@@ -110,6 +160,45 @@ void initSparse()
 
     sparsity = (n*n - g_nnz)/((double)n*n);
 }
+
+void initBitVector(void)
+{
+    int bitmap_count = (n+1)*(n+8)/8;
+    bitmap = (char*) malloc (bitmap_count);
+    for (int i=0; i<bitmap_count; i++) bitmap[i] = 0;
+
+    int nnz=0;
+    int w = 0;
+    int c_count = 0;
+    for (int i=0;i<n;i++)
+    {
+       nnz = 0;
+       for (int j=0;j<n;j++)
+       {
+           if (m[i*n+j] != 0) {
+                bitmap[w] |= (1 << c_count);
+                nnz ++;
+           }
+           c_count ++;
+           if ((c_count % 8) == 0) {
+                w++;
+                c_count = 0;
+           }
+       }
+       if (nnz % 8)
+       {
+           w++;
+           c_count = 0;
+       }
+    }
+}
+
+void initSparse(void)
+{
+    initCSR();
+    initBitVector();
+}
+
 #if 0
 void execSparseScalar(void)
 {
@@ -142,7 +231,7 @@ void execSparseScalar(void)
 }
 #endif
 
-void execSparseScalar(void)
+void execCSRScalar(void)
 {
     int s=0;
     int k=0;
@@ -157,6 +246,33 @@ void execSparseScalar(void)
         }
         k+=nnz;
         y[i]=s;
+    }
+}
+
+void execBVScalar(void)
+{
+    int k=0;
+    int w=0;
+    int r = n%8;
+    int s = 0;
+    if (r) r = (8-r)+n;
+    else r = n;
+
+    for (int i=0;i<n; i++)
+    {
+        s = 0;
+        for (int j=0;j<r; j+= 8)
+        {
+            char bits = bitmap[w++];       
+            // got 8 bits of data
+            for (int m=0;m<8;m++) {
+                if (bits & 0x1) {
+                    s += vals[k++] * v[j+m];
+                }
+                bits >>= 1;
+            }
+        }
+        y[i] = s;
     }
 }
 
@@ -340,7 +456,7 @@ void genHWHelper(void)
 }
 
 #ifndef GENERATE_ONLY
-void execSparseVector_V2(void)
+void execCSRVector_V2(void)
 {
     // initialize locals i, j, s, k, vm;
     // i maps to R18
@@ -492,7 +608,7 @@ post_inner_loop:
     blt_r18_r23_imm_neg_92_macro;
 }
 
-void execSparseVector_V4(void)
+void execCSRVector_V4(void)
 {
     // initialize locals i, j, s, k, vm;
     // i maps to R18
@@ -644,7 +760,7 @@ post_inner_loop:
     blt_r18_r23_imm_neg_92_macro;
 }
 
-void execSparseVector_V8(void)
+void execCSRVector_V8(void)
 {
     // initialize locals i, j, s, k, vm;
     // i maps to R18
@@ -1684,6 +1800,128 @@ void execDenseVector_V8(void)
         reset_v28_r0_macro;
     }
 }
+
+void execDenseDenseScalar(void) 
+{
+    execDenseScalar();
+}
+
+void execDenseDenseVector2(void) 
+{
+    execDenseVector_V2();
+}
+
+void execDenseDenseVector4(void) 
+{
+    execDenseVector_V4();
+}
+
+void execDenseDenseVector8(void) 
+{
+    execDenseVector_V8();
+}
+
+void execHelperDenseCSRScalar(void) 
+{
+}
+
+void execHelperDenseCSRVector2(void) 
+{
+}
+
+void execHelperDenseCSRVector4(void) 
+{
+}
+
+void execHelperDenseCSRVector8(void) 
+{
+}
+
+void execHelperDenseBVScalar(void) 
+{
+}
+
+void execHelperDenseBVVector2(void) 
+{
+}
+
+void execHelperDenseBVVector4(void) 
+{
+}
+
+void execHelperDenseBVVector8(void) 
+{
+}
+
+void execHelperSparseCSRScalar(void) 
+{
+}
+
+void execHelperSparseCSRVector2(void) 
+{
+}
+
+void execHelperSparseCSRVector4(void) 
+{
+}
+
+void execHelperSparseCSRVector8(void) 
+{
+}
+
+void execHelperSparseBVScalar(void) 
+{
+}
+
+void execHelperSparseBVVector2(void) 
+{
+}
+
+void execHelperSparseBVVector4(void) 
+{
+}
+
+void execHelperSparseBVVector8(void) 
+{
+}
+
+void execCSRCSRScalar(void) 
+{
+    execCSRScalar();
+}
+
+void execCSRCSRVector2(void) 
+{
+    execCSRVector_V2();
+}
+
+void execCSRCSRVector4(void) 
+{
+    execCSRVector_V4();
+}
+
+void execCSRCSRVector8(void) 
+{
+    execCSRVector_V8();
+}
+
+void execBVBVScalar(void) 
+{
+    execBVScalar(); 
+}
+
+void execBVBVVector2(void) 
+{
+}
+
+void execBVBVVector4(void) 
+{
+}
+
+void execBVBVVector8(void) 
+{
+}
+
 #endif
 
 void usage(void)
@@ -1692,10 +1930,9 @@ void usage(void)
     printf("Arg 1: 0 or 1 value -- 0 if only compile, 1 if compile+exec\n");
     printf("Arg 2: 0 - dense synth matrix, 1 - CSR sparse matrix, 2 - TAMU COO sparse matrix, 3 - DNN weight matrix\n");
     printf("Arg 3: matrix data file as input.\n");
-    printf("Arg 4: 0 or 1 value -- 0 if doing dense, 1 if doing sparse\n");
-    printf("Arg 5: 0/1/2 value -- 0 if using scalar, 1 if using vectors, 2 if using hardware helper (2 is valid only with sparse)\n");
-    printf("[Opt] Arg 6: 1/2/4/8 -- vector size (1 is same as scalar)\n");
-    printf("\tExpected when Arg 5 is 1 (vectors) or 2 (hardware helper)\n");
+    printf("Arg 4: 0/1/2 value -- storage format: 0 -- dense, 1 -- CSR, 2 -- Bit vector\n");
+    printf("Arg 5: 0/1/2/3/4 value -- compute format: 0 -- dense, 1 -- CSR, 2 -- Bit vector, 3 -- Helper Dense, 4 -- Helper Sparse\n");
+    printf("Arg 6: 1/2/4/8 -- vector size (1 is same as scalar)\n");
 }
 
 typedef enum {DENSE=0, CSR=1, COO=2, DENSE_DNN=3} matrix_type_t;
@@ -1803,21 +2040,9 @@ int main(int argc, char ** argv)
     }
     initSparse();
 
-    bool do_sparse = false;
-    if (strcmp(argv[4],"1") == 0) do_sparse = true;
-
-    bool use_vectors = false;
-    bool use_hw_helper = false;
-    if (strcmp(argv[5],"1") == 0) use_vectors = true;
-    if (strcmp(argv[5],"2") == 0) use_hw_helper = true;
-
-    bool need_vector_size = false;
-    if (use_vectors || use_hw_helper) need_vector_size = true;
-    if (argc <= 6) {
-        printf("Missing vector size argument!\n");
-        exit(0);
-    }
-
+    storage_type = strtoul(argv[4],NULL,10);
+    compute_type = strtoul(argv[5],NULL,10);
+    
     if (argc > 6) {
         vector_size = strtoul(argv[6],NULL,10);
         if (vector_size != 1 && vector_size != 2 && vector_size != 4 && vector_size != 8) {
@@ -1827,75 +2052,27 @@ int main(int argc, char ** argv)
         printf("Vector size: %d\n", vector_size);
     }
 
-    if (!do_sparse && use_hw_helper) {
-        printf("Invalid options: HW Helper option is only valid with sparse computation.\n");
-        exit(0);
-    }
     genDenseVector();
     genSparseVector();
     genHWHelper();
     execDenseScalar();
 
-#define COMPARE (1)
+#define COMPARE (0)
     last_op = y[COMPARE];
     printf("last_op is %d\n", last_op);
     y[COMPARE] = last_op -1;
-    volatile unsigned long s, e;
+    volatile unsigned long long s, e;
     //save_regs();
 #ifdef GENERATE_ONLY
     return 0;
 #else
     if (!do_compile_exec) { free(m); free(v); return 0;}
+    exec_fn = assignExecuteFunction(storage_type, compute_type, vector_size);
     s = read_cycles();
-    if (do_sparse)
-    {
-        if (use_vectors)
-        { 
-            if (vector_size == 1)
-                execSparseScalar();
-            else if (vector_size == 2)
-                execSparseVector_V2();
-            else if (vector_size == 4)
-                execSparseVector_V4();
-            else if (vector_size == 8)
-                execSparseVector_V8();
-        }
-        else if (use_hw_helper)
-        {
-            if (vector_size == 1)
-                execHWHelperScalar();
-            else if (vector_size == 2)
-                execHWHelper_V2();
-            else if (vector_size == 4)
-                execHWHelper_V4();
-            else if (vector_size == 8)
-            {
-                execHWHelper_V8();
-            }
-        }
-        else
-            execSparseScalar();
-    }
-    else {
-        if (use_vectors)
-        {
-            if (vector_size == 1)
-                execDenseScalar();
-            else if (vector_size == 2)
-                execDenseVector_V2();
-            else if (vector_size == 4)
-                execDenseVector_V4();
-            else if (vector_size == 8)
-                execDenseVector_V8();
-        }
-        else
-        {
-            execDenseScalar();
-        }
-    }
     //restore_regs();
+    exec_fn();
     e = read_cycles();
-    printf("Input: %s; Matrix Dim: %d by %d; NNZ: %d; Sparsity: %g; Cycles:%ld\n", g_file_name, n, n, g_nnz, sparsity, e-s);
+    printf("Input: %s; Matrix Dim: %d by %d; NNZ: %d; Sparsity: %g; Cycles:%lld\n", g_file_name, n, n, g_nnz, sparsity, e-s);
     
     // check contents of y.
     printf("Last expected: %d\n", last_op);
@@ -1909,3 +2086,156 @@ int main(int argc, char ** argv)
     return 0;
 #endif
 }
+
+#ifndef GENERATE_ONLY
+PFN assignExecuteFunction(storage_type_t storage_format, compute_type_t compute_format, int vector_size)
+{
+    switch (compute_format)
+    {
+    case C_DENSE:
+        switch (storage_format)
+        {
+        case S_DENSE:
+            switch (vector_size)
+            {
+            case 1: return execDenseDenseScalar;
+            case 2: return execDenseDenseVector2;
+            case 4: return execDenseDenseVector4;
+            case 8: return execDenseDenseVector8;
+            }
+            break;
+        case S_CSR:
+            switch (vector_size)
+            {
+            case 1: return execHelperDenseCSRScalar;
+            case 2: return execHelperDenseCSRVector2;
+            case 4: return execHelperDenseCSRVector4;
+            case 8: return execHelperDenseCSRVector8;
+            }
+            break;
+        case S_BV:
+            switch (vector_size)
+            {
+            case 1: return execHelperDenseBVScalar;
+            case 2: return execHelperDenseBVVector2;
+            case 4: return execHelperDenseBVVector4;
+            case 8: return execHelperDenseBVVector8;
+            }
+            break;
+        default:
+            printf("Illegal storage format %d\n", storage_format);
+        }
+        break;
+    case C_CSR:
+        switch (storage_format)
+        {
+        case S_DENSE:
+            printf("Illegal .. can not compute CSR with Dense storage!\n");
+            exit(0);
+            break;
+        case S_CSR:
+            switch (vector_size)
+            {
+            case 1: return execCSRCSRScalar;
+            case 2: return execCSRCSRVector2;
+            case 4: return execCSRCSRVector4;
+            case 8: return execCSRCSRVector8;
+            }
+            break;
+        case S_BV:
+            printf("Illegal .. can not compute CSR with Bit vector storage!\n");
+            exit(0);
+            break;
+        default:
+            printf("Illegal storage format %d\n", storage_format);
+        }
+        break;
+    case C_BV:
+        switch (storage_format)
+        {
+        case S_DENSE:
+            printf("Illegal .. can not compute Bit-Vector with Dense storage!\n");
+            exit(0);
+            break;
+        case S_CSR:
+            printf("Illegal .. can not compute Bit-vector with CSR storage!\n");
+            exit(0);
+            break;
+        case S_BV:
+            switch (vector_size)
+            {
+            case 1: return execBVBVScalar;
+            case 2: return execBVBVVector2;
+            case 4: return execBVBVVector4;
+            case 8: return execBVBVVector8;
+            }
+            break;
+        default:
+            printf("Illegal storage format %d\n", storage_format);
+        }
+        break;
+    case C_HHT_DENSE:
+        switch (storage_format)
+        {
+        case S_DENSE:
+            printf("Illegal .. can not do HHT_Dense with Dense storage!\n");
+            exit(0);
+            break;
+        case S_CSR:
+            switch (vector_size)
+            {
+            case 1: return execHelperDenseCSRScalar;
+            case 2: return execHelperDenseCSRVector2;
+            case 4: return execHelperDenseCSRVector4;
+            case 8: return execHelperDenseCSRVector8;
+            }
+            break;
+        case S_BV:
+            switch (vector_size)
+            {
+            case 1: return execHelperDenseBVScalar;
+            case 2: return execHelperDenseBVVector2;
+            case 4: return execHelperDenseBVVector4;
+            case 8: return execHelperDenseBVVector8;
+            }
+            break;
+        default:
+            printf("Illegal storage format %d\n", storage_format);
+        }
+        break;
+    case C_HHT_SPARSE:
+        switch (storage_format)
+        {
+        case S_DENSE:
+            printf("Illegal .. can not do HHT_Sparse with Dense storage!\n");
+            exit(0);
+            break;
+        case S_CSR:
+            switch (vector_size)
+            {
+            case 1: return execHelperSparseCSRScalar;
+            case 2: return execHelperSparseCSRVector2;
+            case 4: return execHelperSparseCSRVector4;
+            case 8: return execHelperSparseCSRVector8;
+            }
+            break;
+        case S_BV:
+            switch (vector_size)
+            {
+            case 1: return execHelperSparseBVScalar;
+            case 2: return execHelperSparseBVVector2;
+            case 4: return execHelperSparseBVVector4;
+            case 8: return execHelperSparseBVVector8;
+            }
+            break;
+        default:
+            printf("Illegal storage format %d\n", storage_format);
+        }
+        break;
+    default:
+        printf("Illegal compute format %d\n", compute_format);
+        break;
+    }
+    return 0;
+}
+#endif
