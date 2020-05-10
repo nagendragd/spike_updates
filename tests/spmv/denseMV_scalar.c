@@ -74,6 +74,7 @@ int v_upper_20;
 
 // Bitvector representation of matrix M
 char * bitmap;
+int  * b_vals;
 // we do not create another values vector
 // for M as CSR vals is the same format.
 
@@ -163,32 +164,25 @@ void initCSR()
 
 void initBitVector(void)
 {
-    int bitmap_count = (n+1)*(n+8)/8;
-    bitmap = (char*) malloc (bitmap_count);
+    int bitmap_count = (n+1)*(n+8)/(8*sizeof(char));
+    bitmap = (char*) malloc (bitmap_count*sizeof(char));
     for (int i=0; i<bitmap_count; i++) bitmap[i] = 0;
+    b_vals = (int*) malloc((n+8)*(n+8)*sizeof(int));
 
-    int nnz=0;
     int w = 0;
-    int c_count = 0;
+    int l = 0;
     for (int i=0;i<n;i++)
     {
-       nnz = 0;
-       for (int j=0;j<n;j++)
+       for (int j=0;j<n;j+=8)
        {
-           if (m[i*n+j] != 0) {
-                bitmap[w] |= (1 << c_count);
-                nnz ++;
+           for (int k=0;k<8;k++)
+           {
+                if (m[i*n+j+k] != 0) {
+                    bitmap[w] |= (1 << k);
+                    b_vals[l++] = m[i*n+j+k];
+                }
            }
-           c_count ++;
-           if ((c_count % 8) == 0) {
-                w++;
-                c_count = 0;
-           }
-       }
-       if (nnz % 8)
-       {
            w++;
-           c_count = 0;
        }
     }
 }
@@ -243,8 +237,11 @@ void execCSRScalar(void)
         {
             s+=vals[k+j]*v[cols[k+j]];
             //s+=A_sparse_vals[k+j]*w_dense[j];
+            //printf("Val %d from %d\n", vals[k+j], k+j);
+            //printf("V %d from %d\n", v[cols[k+j]], cols[k+j]);
         }
         k+=nnz;
+        //printf("Wrote %d to %d\n", s, i);
         y[i]=s;
     }
 }
@@ -261,17 +258,20 @@ void execBVScalar(void)
     for (int i=0;i<n; i++)
     {
         s = 0;
-        for (int j=0;j<r; j+= 8)
+        for (int j=0;j<r; j+= 8*sizeof(char))
         {
-            char bits = bitmap[w++];       
+            char bits = bitmap[w++];
             // got 8 bits of data
-            for (int m=0;m<8;m++) {
+            for (int m=0;m<8*sizeof(char);m++) {
                 if (bits & 0x1) {
-                    s += vals[k++] * v[j+m];
+                    s += b_vals[k++] * v[j+m];
+                    //printf("Val %d from %d\n", vals[k-1], k-1);
+                    //printf("V %d from %d\n", v[j+m], j+m);
                 }
                 bits >>= 1;
             }
         }
+        //printf("Wrote %d to %d\n", s, i);
         y[i] = s;
     }
 }
@@ -2057,7 +2057,7 @@ int main(int argc, char ** argv)
     genHWHelper();
     execDenseScalar();
 
-#define COMPARE (0)
+#define COMPARE (1)
     last_op = y[COMPARE];
     printf("last_op is %d\n", last_op);
     y[COMPARE] = last_op -1;
