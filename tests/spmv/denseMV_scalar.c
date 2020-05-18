@@ -72,7 +72,12 @@ int vals_lower_12;
 int vals_upper_20;
 int v_upper_20;
 
-// Bitvector representation of matrix M
+// Run-length representation of matrix M
+int * rl_rows; // number of run lengths in each row
+int * rl_cols; //holds pairs of (start column, number of columns)
+int * rl_vals; //holds non-zero values
+float average_run_length;
+
 char * bitmap;
 int  * b_vals;
 // we do not create another values vector
@@ -89,8 +94,8 @@ int t_upper_20;
 
 typedef void (*PFN)(void);
 PFN exec_fn;
-typedef enum {S_DENSE=0, S_CSR=1, S_BV=2} storage_type_t;
-typedef enum {C_DENSE=0, C_CSR=1, C_BV=2, C_HHT_DENSE=3, C_HHT_SPARSE=4} compute_type_t;
+typedef enum {S_DENSE=0, S_CSR=1, S_BV=2, S_RL=3} storage_type_t;
+typedef enum {C_DENSE=0, C_CSR=1, C_BV=2, C_RL=3, C_HHT_DENSE=4, C_HHT_SPARSE=5} compute_type_t;
 storage_type_t storage_type;
 compute_type_t compute_type;
 PFN assignExecuteFunction(storage_type_t storage_format, compute_type_t compute_format, int vector_size);
@@ -107,6 +112,10 @@ void execHelperDenseBVScalar(void);
 void execHelperDenseBVVector2(void);
 void execHelperDenseBVVector4(void);
 void execHelperDenseBVVector8(void);
+void execHelperDenseRLScalar(void);
+void execHelperDenseRLVector2(void);
+void execHelperDenseRLVector4(void);
+void execHelperDenseRLVector8(void);
 void execHelperSparseCSRScalar(void);
 void execHelperSparseCSRVector2(void);
 void execHelperSparseCSRVector4(void);
@@ -115,6 +124,10 @@ void execHelperSparseBVScalar(void);
 void execHelperSparseBVVector2(void);
 void execHelperSparseBVVector4(void);
 void execHelperSparseBVVector8(void);
+void execHelperSparseRLScalar(void);
+void execHelperSparseRLVector2(void);
+void execHelperSparseRLVector4(void);
+void execHelperSparseRLVector8(void);
 void execCSRCSRScalar(void);
 void execCSRCSRVector2(void);
 void execCSRCSRVector4(void);
@@ -123,6 +136,10 @@ void execBVBVScalar(void);
 void execBVBVVector2(void);
 void execBVBVVector4(void);
 void execBVBVVector8(void);
+void execRLRLScalar(void);
+void execRLRLVector2(void);
+void execRLRLVector4(void);
+void execRLRLVector8(void);
 
 void initCSR()
 {
@@ -187,10 +204,79 @@ void initBitVector(void)
     }
 }
 
+void initRunLength()
+{
+    rl_rows = (int *) malloc ((n+8)*sizeof(int));
+    rl_vals = (int*) malloc((n+8)*(n+8)*sizeof(int));
+    rl_cols = (int*) malloc(2*(n+8)*(n+8)*sizeof(int));
+
+    int l=0;
+    int h=0;
+    int k=0;
+    bool in_run = false;
+    int rl=0;
+    int start_col;
+    for (int i=0;i<n;i++)
+    {
+       in_run = false;
+       rl = 0;
+       k = 0;
+       for (int j=0;j<n;j++)
+       {
+            if (m[i*n+j] != 0) {
+                rl_vals[l++] = m[i*n+j];
+
+                if (!in_run) start_col = j;
+                rl++;
+                in_run = true; 
+            } else {
+                if (in_run)
+                {
+                    // found a run
+                    rl_cols[h++]=rl;
+                    rl_cols[h++]=start_col;
+                    rl = 0;
+                    in_run = false;
+                    k++;
+                }
+            }
+        }
+        if (in_run)
+        {
+            // found a run at the end
+            rl_cols[h++]=rl;
+            rl_cols[h++]=start_col;
+            rl = 0;
+            in_run = false;
+            k++;
+        }
+        rl_rows[i] = k;
+    }
+
+    int num_run_lengths = 0;
+    int total_lengths = 0;
+    k = 0;
+    for (int i=0;i<n;i++) 
+    {
+        num_run_lengths += rl_rows[i];
+        for (int j=0;j<rl_rows[i]; j++)
+        {
+            total_lengths += rl_cols[k];
+            k+=2;
+        }
+    }
+    //printf("Total number of RLs is %d\n", num_run_lengths);
+    //printf("Total lengths is %d\n", total_lengths);
+    average_run_length = (double) total_lengths/(double) num_run_lengths;
+
+    printf("Average Run Length of Data is %f\n", average_run_length);
+}
+
 void initSparse(void)
 {
     initCSR();
     initBitVector();
+    initRunLength();
 }
 
 #if 0
@@ -233,6 +319,7 @@ void execCSRScalar(void)
     {
         int nnz = rows[i+1]-rows[i];
         s=0;
+#if 0
         for (int j=0;j<nnz;j++)
         {
             s+=vals[k+j]*v[cols[k+j]];
@@ -240,8 +327,29 @@ void execCSRScalar(void)
             //printf("Val %d from %d\n", vals[k+j], k+j);
             //printf("V %d from %d\n", v[cols[k+j]], cols[k+j]);
         }
+#else
+        int j;
+        for (j=0;j<nnz;j+=8)
+        {
+            s+=vals[k+j]*v[cols[k+j]];
+            s+=vals[k+j+1]*v[cols[k+j+1]];
+            s+=vals[k+j+2]*v[cols[k+j+2]];
+            s+=vals[k+j+3]*v[cols[k+j+3]];
+            s+=vals[k+j+4]*v[cols[k+j+4]];
+            s+=vals[k+j+5]*v[cols[k+j+5]];
+            s+=vals[k+j+6]*v[cols[k+j+6]];
+            s+=vals[k+j+7]*v[cols[k+j+7]];
+        }
+
+        int r = nnz - j;
+        for (int h=0; h<r; h++)
+        {
+            s+=vals[k+j+h]*v[cols[k+j+h]];
+        }
+        
+
+#endif
         k+=nnz;
-        //printf("Wrote %d to %d\n", s, i);
         y[i]=s;
     }
 }
@@ -262,6 +370,7 @@ void execBVScalar(void)
         {
             char bits = bitmap[w++];
             // got 8 bits of data
+#if 0
             for (int m=0;m<8*sizeof(char);m++) {
                 if (bits & 0x1) {
                     s += b_vals[k++] * v[j+m];
@@ -270,8 +379,40 @@ void execBVScalar(void)
                 }
                 bits >>= 1;
             }
+#else
+            if (bits & 0x1) s += b_vals[k++] * v[j];    
+            if (bits & 0x2) s += b_vals[k++] * v[j+1];    
+            if (bits & 0x4) s += b_vals[k++] * v[j+2];    
+            if (bits & 0x8) s += b_vals[k++] * v[j+3];    
+            if (bits & 0x10) s += b_vals[k++] * v[j+4];    
+            if (bits & 0x20) s += b_vals[k++] * v[j+5];    
+            if (bits & 0x40) s += b_vals[k++] * v[j+6];    
+            if (bits & 0x80) s += b_vals[k++] * v[j+7];    
+#endif
         }
         //printf("Wrote %d to %d\n", s, i);
+        y[i] = s;
+    }
+}
+
+void execRLScalar(void)
+{
+    int s,c,k,l,num_cols,start_col,v_idx;
+    k = 0;
+    v_idx = 0;
+    for (int i=0;i < n; i++)
+    {
+        s=0;
+        c = rl_rows[i];
+        for (int j=0;j<c; j++)
+        {
+            num_cols = rl_cols[k++];
+            start_col = rl_cols[k++];
+            for (l=0;l<num_cols;l++)
+            {
+                s += rl_vals[v_idx++]*v[start_col+l];
+            }
+        }
         y[i] = s;
     }
 }
@@ -1533,13 +1674,28 @@ post_inner_loop:
 
 void execDenseScalar(void)
 {
+    int s;
     for (int i=0;i<n;i++)
     {
-        y[i] = 0;
+        s = 0;
+        /*
         for (int j=0;j<n;j++)
         {
-            y[i] += m[i*n+j]*v[j];
+            s += m[i*n+j]*v[j];
         }
+        */
+        for (int j=0;j<n;j+=8)
+        {
+            s += m[i*n+j]*v[j];
+            s += m[i*n+j+1]*v[j+1];
+            s += m[i*n+j+2]*v[j+2];
+            s += m[i*n+j+3]*v[j+3];
+            s += m[i*n+j+4]*v[j+4];
+            s += m[i*n+j+5]*v[j+5];
+            s += m[i*n+j+6]*v[j+6];
+            s += m[i*n+j+7]*v[j+7];
+        }
+        y[i] = s;
     }
 }
 
@@ -1853,6 +2009,22 @@ void execHelperDenseBVVector8(void)
 {
 }
 
+void execHelperDenseRLScalar(void) 
+{
+}
+
+void execHelperDenseRLVector2(void) 
+{
+}
+
+void execHelperDenseRLVector4(void) 
+{
+}
+
+void execHelperDenseRLVector8(void) 
+{
+}
+
 void execHelperSparseCSRScalar(void) 
 {
 }
@@ -1882,6 +2054,22 @@ void execHelperSparseBVVector4(void)
 }
 
 void execHelperSparseBVVector8(void) 
+{
+}
+
+void execHelperSparseRLScalar(void) 
+{
+}
+
+void execHelperSparseRLVector2(void) 
+{
+}
+
+void execHelperSparseRLVector4(void) 
+{
+}
+
+void execHelperSparseRLVector8(void) 
 {
 }
 
@@ -1922,6 +2110,23 @@ void execBVBVVector8(void)
 {
 }
 
+void execRLRLScalar(void) 
+{
+    execRLScalar(); 
+}
+
+void execRLRLVector2(void) 
+{
+}
+
+void execRLRLVector4(void) 
+{
+}
+
+void execRLRLVector8(void) 
+{
+}
+
 #endif
 
 void usage(void)
@@ -1930,8 +2135,8 @@ void usage(void)
     printf("Arg 1: 0 or 1 value -- 0 if only compile, 1 if compile+exec\n");
     printf("Arg 2: 0 - dense synth matrix, 1 - CSR sparse matrix, 2 - TAMU COO sparse matrix, 3 - DNN weight matrix\n");
     printf("Arg 3: matrix data file as input.\n");
-    printf("Arg 4: 0/1/2 value -- storage format: 0 -- dense, 1 -- CSR, 2 -- Bit vector\n");
-    printf("Arg 5: 0/1/2/3/4 value -- compute format: 0 -- dense, 1 -- CSR, 2 -- Bit vector, 3 -- Helper Dense, 4 -- Helper Sparse\n");
+    printf("Arg 4: 0/1/2 value -- storage format: 0 -- dense, 1 -- CSR, 2 -- Bit vector, 3 -- Run-length\n");
+    printf("Arg 5: 0/1/2/3/4 value -- compute format: 0 -- dense, 1 -- CSR, 2 -- Bit vector, 3 -- Run-length, 4 -- Helper Dense, 5 -- Helper Sparse\n");
     printf("Arg 6: 1/2/4/8 -- vector size (1 is same as scalar)\n");
 }
 
@@ -2052,12 +2257,14 @@ int main(int argc, char ** argv)
         printf("Vector size: %d\n", vector_size);
     }
 
+#ifdef RISCV_BUILD
     genDenseVector();
     genSparseVector();
     genHWHelper();
+#endif
     execDenseScalar();
 
-#define COMPARE (1)
+#define COMPARE ((n-1))
     last_op = y[COMPARE];
     printf("last_op is %d\n", last_op);
     y[COMPARE] = last_op -1;
@@ -2122,6 +2329,15 @@ PFN assignExecuteFunction(storage_type_t storage_format, compute_type_t compute_
             case 8: return execHelperDenseBVVector8;
             }
             break;
+        case S_RL:
+            switch (vector_size)
+            {
+            case 1: return execHelperDenseRLScalar;
+            case 2: return execHelperDenseRLVector2;
+            case 4: return execHelperDenseRLVector4;
+            case 8: return execHelperDenseRLVector8;
+            }
+            break;
         default:
             printf("Illegal storage format %d\n", storage_format);
         }
@@ -2146,6 +2362,10 @@ PFN assignExecuteFunction(storage_type_t storage_format, compute_type_t compute_
             printf("Illegal .. can not compute CSR with Bit vector storage!\n");
             exit(0);
             break;
+        case S_RL:
+            printf("Illegal .. can not compute CSR with RL storage!\n");
+            exit(0);
+            break;
         default:
             printf("Illegal storage format %d\n", storage_format);
         }
@@ -2168,6 +2388,38 @@ PFN assignExecuteFunction(storage_type_t storage_format, compute_type_t compute_
             case 2: return execBVBVVector2;
             case 4: return execBVBVVector4;
             case 8: return execBVBVVector8;
+            }
+            break;
+        case S_RL:
+            printf("Illegal .. can not compute Bit-vector with RL storage!\n");
+            exit(0);
+            break;
+        default:
+            printf("Illegal storage format %d\n", storage_format);
+        }
+        break;
+    case C_RL:
+        switch (storage_format)
+        {
+        case S_DENSE:
+            printf("Illegal .. can not compute Run-Length with Dense storage!\n");
+            exit(0);
+            break;
+        case S_CSR:
+            printf("Illegal .. can not compute Run-Length with CSR storage!\n");
+            exit(0);
+            break;
+        case S_BV:
+            printf("Illegal .. can not compute Run-Length with Bit-Vector storage!\n");
+            exit(0);
+            break;
+        case S_RL:
+            switch (vector_size)
+            {
+            case 1: return execRLRLScalar;
+            case 2: return execRLRLVector2;
+            case 4: return execRLRLVector4;
+            case 8: return execRLRLVector8;
             }
             break;
         default:
@@ -2199,6 +2451,15 @@ PFN assignExecuteFunction(storage_type_t storage_format, compute_type_t compute_
             case 8: return execHelperDenseBVVector8;
             }
             break;
+        case S_RL:
+            switch (vector_size)
+            {
+            case 1: return execHelperDenseRLScalar;
+            case 2: return execHelperDenseRLVector2;
+            case 4: return execHelperDenseRLVector4;
+            case 8: return execHelperDenseRLVector8;
+            }
+            break;
         default:
             printf("Illegal storage format %d\n", storage_format);
         }
@@ -2226,6 +2487,15 @@ PFN assignExecuteFunction(storage_type_t storage_format, compute_type_t compute_
             case 2: return execHelperSparseBVVector2;
             case 4: return execHelperSparseBVVector4;
             case 8: return execHelperSparseBVVector8;
+            }
+            break;
+        case S_RL:
+            switch (vector_size)
+            {
+            case 1: return execHelperSparseRLScalar;
+            case 2: return execHelperSparseRLVector2;
+            case 4: return execHelperSparseRLVector4;
+            case 8: return execHelperSparseRLVector8;
             }
             break;
         default:

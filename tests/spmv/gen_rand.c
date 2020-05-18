@@ -5,7 +5,7 @@
 #include <time.h>
 using namespace std;
 
-#define NUM_ARGS 5
+#define NUM_ARGS 6
 
 void usage(void)
 {
@@ -13,6 +13,7 @@ void usage(void)
     cout <<"Number of dimensions [1 or 2]" << endl;
     cout <<"Size of dimension [for 2-dimensional, assume square shape]" << endl;
     cout <<"\% Sparsity desired" << endl;
+    cout <<"Average run-length of non-zero clusters" << endl;
     cout <<"Output C header file path-name" << endl;
     cout <<"Output data file prefix (without file extension)" << endl;
 }
@@ -26,7 +27,8 @@ int *rows;
 int *cols;
 int *vals;
 int **A;
-void genData(int num_dim, int dim_size, float sparsity);
+void genRowData(int dim_size, int rl, int num_rls, int *w);
+void genData(int num_dim, int dim_size, float sparsity, int rl);
 void outData(ofstream& header, ofstream& data, int num_dim, int dim_size, bool compressed=true);
 void outData1(ofstream& header, ofstream& data, int dim_size, bool compressed=true);
 void outData2(ofstream& header, ofstream& data, int dim_size, bool compressed=true);
@@ -41,8 +43,9 @@ int main(int argc, char ** argv)
     stringstream in_dim(argv[1]); 
     stringstream in_size(argv[2]); 
     stringstream in_sparse(argv[3]); 
-    stringstream in_out_h_file(argv[4]); 
-    stringstream in_out_data_file(argv[5]); 
+    stringstream in_run_length(argv[4]); 
+    stringstream in_out_h_file(argv[5]); 
+    stringstream in_out_data_file(argv[6]); 
 
     int num_dim;
     in_dim >> num_dim;
@@ -50,9 +53,11 @@ int main(int argc, char ** argv)
     in_size >> dim_size;
     float sparse;
     in_sparse >> sparse;
+    int rl;
+    in_run_length >> rl;
 
     /* generate data */
-    genData(num_dim, dim_size, sparse);
+    genData(num_dim, dim_size, sparse, rl);
 
     string out_h_file_name;
     string out_compressed_data_file_name;
@@ -81,32 +86,54 @@ int main(int argc, char ** argv)
     return 0;
 }
 
-void genData(int num_dim, int dim_size, float sparsity)
+void genRowData(int dim_size, int rl, int num_rls, int *w)
+{
+    int nnz_per_row = rl * num_rls;
+    int gap = (dim_size - nnz_per_row)/num_rls;
+    if (gap == 0) gap = 1;
+    int k=0;
+    bool broke = false;
+    for (int i=0; i<num_rls; i++)
+    {
+        for (int j=0;j<rl;j++) 
+        { 
+            w[k++] = 1; 
+            nnz_vec++; 
+            if (k==dim_size) { broke = true; break;}
+        } // non-zero
+        if (broke) break;
+        for (int j=0;j<gap;j++) 
+        {
+            w[k++] = 0; // zero
+            if (k==dim_size) { broke = true; break;}
+        }
+        if (broke) break;
+    }
+    for (int i=k;i<dim_size;i++) 
+    {
+        w[i] = 0;
+    }
+}
+
+void genData(int num_dim, int dim_size, float sparsity, int rl)
 {
     srand(time(NULL));
     cout <<"Sparsity " << sparsity << endl;
+
+    int nnz_per_row = dim_size * (100-sparsity)/100;
+    if (rl > nnz_per_row) rl = nnz_per_row;
+    int num_rls = nnz_per_row / rl;
+    cout << "Run length " << rl << endl;
+    cout << "Number of runs per row " << num_rls << endl;
+    
     if (num_dim == 1) {
        w = new int[dim_size];
-
-       for (int i=0;i<dim_size;i++)
-       {
-           int x = (int)rand()%100;
-           if (x <= sparsity) x = 0;
-           w[i] = x;
-           if (w[i] != 0) {
-               nnz_vec++;
-           }
-       }
+       genRowData(dim_size, rl, num_rls, w); 
     } else {
        A = new int*[dim_size];
        for (int i=0;i<dim_size;i++) A[i] = new int[dim_size];
        for (int i=0;i<dim_size;i++)
-       for (int j=0;j<dim_size;j++)
-       {
-           int x = (int)rand()%100;
-           if (x <= sparsity) x = 0;
-           A[i][j] = x;
-       }
+           genRowData(dim_size, rl, num_rls, A[i]);
     }
 }
 
